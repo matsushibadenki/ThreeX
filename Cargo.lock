@@ -839,6 +839,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "threex-storage"
+version = "0.1.0"
+dependencies = [
+ "threex-core",
+]
+
+[[package]]
 name = "threex-wasm"
 version = "0.1.0"
 dependencies = [

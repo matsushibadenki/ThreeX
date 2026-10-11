@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-12 JST",
+  "architecture": "arm64",
+  "rustc": "1.99.0",
+  "release": "thin LTO",
+  "warmup": 4,
+  "samples": 24,
+  "pairs": 2,
+  "scene": "initial 100/10000 independent entities, no meshes",
+  "workloads": [
+    "create each edit",
+    "create once then update position"
+  ],
+  "prepare_only": "does not mutate document; black_box prepared group",
+  "journal_sync": "full prepare/write/sync/apply, scene grows per iteration",
+  "fsyncs_per_group_before_after": 1,
+  "gpu": false,
+  "rss_measured": false,
+  "baseline_sha256": "d6e3093f9a11a6e59baa31809d621934ccb25be61218cc2379b2b4ad35676b80"
+}

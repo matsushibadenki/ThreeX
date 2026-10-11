@@ -1,0 +1,15 @@
+{
+  "date": "2026-10-12 JST",
+  "architecture": "arm64",
+  "rustc": "1.99.0",
+  "release": "thin LTO",
+  "warmup": 4,
+  "samples": 24,
+  "pairs": 2,
+  "scene": "independent meshes, revision 1, empty initial history",
+  "edit": "one tail object position.x per iteration",
+  "timing": "stage_apply CPU only; journal_sync includes real filesystem write and sync",
+  "gpu": false,
+  "memory_rss_measured": false,
+  "baseline_sha256": "f166cd2fa4ed03fd6a2d4c62ecc57b5b4d4527edab20b3f29e6fa5170354c8a8"
+}

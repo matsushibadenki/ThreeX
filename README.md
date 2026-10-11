@@ -92,3 +92,29 @@ The former renderer `upload_ranges` byte-comparison helper was removed.
 ```sh
 cargo run --offline --release -p threex-core --example upload_bench
 ```
+
+## Four design integration
+
+The existing JS facade remains compatible. Optional Rust `Document` owns editing
+history above Scene, checks expected revisions, and supports bounded Undo/Redo
+with stable entity IDs. Renderers borrow `document.scene()`; windows do not own
+the document. Versioned persistence and recovery are available in `threex-storage`; Tauri host
+wiring remains future work. See [storage guarantees and tests](docs/four/persistence.md).
+
+Adopted scope, three-language specifications and verification:
+[Four integration](docs/four/README.md). No external Four or Universal-3D path
+dependency is required. This is an independent implementation from supplied design
+documents; Four source code was unavailable.
+
+Rust `threex_storage::AutosaveDocument` journals accepted commits, Undo and Redo
+automatically and recovers the last complete transaction from an interrupted or
+corrupt suffix. Use this owner for durable edits; standalone Document remains
+in-memory. See [autosave guarantees and API](docs/four/autosave-journal.md).
+Tauri/WASM host wiring is not implemented.
+
+Journal preparation now retains only changed objects and validates before IO.
+[Before/after CPU and sync measurements](docs/four/journal-staging-performance.md).
+
+Group commit API・復旧境界・性能比較：[docs/four/group-commit-performance.md](docs/four/group-commit-performance.md)。
+
+Groupの変更ID overlayと性能比較：[docs/four/group-prefix-performance.md](docs/four/group-prefix-performance.md)。

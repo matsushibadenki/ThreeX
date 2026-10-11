@@ -38,7 +38,7 @@ and limitations are in soa-performance.md. GPU/power measurements remain pending
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust scene/transform/journal tests: 17 passed in debug and release. WGSL validation: 1 passed.
+- Rust scene/transform/journal tests: 26 passed in debug and release. WGSL validation: 1 passed.
 - JS compatibility tests: 4 passed.
 - Native GPU test: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.
@@ -54,3 +54,30 @@ and limitations are in soa-performance.md. GPU/power measurements remain pending
 Current upload-preparation comparisons and limits: upload-performance.md; raw data: benchmarks/upload-*.csv.
 
 Current membership packing measurements and limitations: packing-performance.md; raw data: benchmarks/packing-*.csv.
+
+## Four設計の統合
+
+🟢 [Done] ThreeX互換APIを維持してFourのRust所有・取引編集・有界履歴を採用。
+🟢 [Done] Documentサービス：revision競合検出、Undo/Redo、安定ID復元、明示読取snapshot。
+🟢 [Done] FX-01〜06の日本語・英語・简体中文仕様と実装対応表（four/README.md）。
+🟢 [Done] version付きDocument checkpoint、Undo/Redo永続化、世代復旧、障害・プロセス終了テスト（storage 16件）。
+🟠 [Next] 永続Document ID・内容hash・移行、Tauriホスト接続・IPC／エラー翻訳。
+🔴 [Later] WorkspaceStateと評価World分離、取引的surface再接続。
+⭕️ [Pending] OS別native surface・ドッキング・GPU喪失の実機検証。
+
+⭕️ [Pending] 保存の実電源断・容量不足・Windows／Linux durability検証。
+
+🟢 [Done] AutosaveDocument：commit／Undo／Redoの自動journal、末尾の最後の正常transaction復旧。
+🟢 [Done] journal append／圧縮の中断、全切断位置・破損、process exit・追記再開のテスト。
+🟢 [Done] journal差分transaction prepare/apply、全Document複製廃止、CPU／fsync込み前後比較。
+🟢 [Done] bounded group commit、1syncで複数revisionを公開、正常prefix復旧・前後性能比較。
+🟠 [Next] worker／Tauri接続・request重複排除。
+最新仕様と制約：four/autosave-journal.md。
+
+最新の差分journal性能と制約：four/journal-staging-performance.md。
+
+Group commit仕様・計測・制約：four/group-commit-performance.md。
+
+🟢 [Done] group累積prefixの再検証・再適用を変更ID overlayへ差分化、障害復旧維持、前後性能比較。
+🟠 [Next] 構造編集の全体階層検証／隣接表再構築の差分化。
+最新のgroup準備仕様・計測：four/group-prefix-performance.md。

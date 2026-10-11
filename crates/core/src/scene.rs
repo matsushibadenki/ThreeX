@@ -31,6 +31,33 @@ pub struct Scene {
     identity: Arc<()>,
     journal: InstanceJournal,
 }
+pub(crate) struct SceneEdit {
+    changes: BTreeMap<u32, Option<Object>>,
+    structural: bool,
+}
+impl SceneEdit {
+    pub(crate) fn changes_overlay(
+        &self,
+        scene: &Scene,
+        overlay: &BTreeMap<u32, Option<Object>>,
+    ) -> bool {
+        self.changes.iter().any(|(&id, &value)| {
+            value
+                != overlay
+                    .get(&id)
+                    .copied()
+                    .unwrap_or_else(|| scene.object(id))
+        })
+    }
+    pub(crate) fn extend_overlay(&self, overlay: &mut BTreeMap<u32, Option<Object>>) {
+        overlay.extend(self.changes.iter().map(|(&id, &value)| (id, value)));
+    }
+    pub(crate) fn changes_scene(&self, scene: &Scene) -> bool {
+        self.changes
+            .iter()
+            .any(|(&id, &value)| scene.object(id) != value)
+    }
+}
 impl Scene {
     pub fn stamp(&self) -> SceneStamp {
         SceneStamp {
@@ -57,6 +84,12 @@ impl Scene {
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
+    /// Explicit document snapshot iteration; rendering uses retained instances instead.
+    pub fn objects(&self) -> impl Iterator<Item = (u32, Object)> + '_ {
+        self.indices
+            .iter()
+            .map(|(&id, &slot)| (id, self.store.object(slot)))
+    }
     pub fn object(&self, id: u32) -> Option<Object> {
         self.indices.get(&id).map(|&slot| self.store.object(slot))
     }
@@ -77,12 +110,21 @@ impl Scene {
             .and_then(|&slot| self.store.packed_indices[slot])
     }
     pub fn apply(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let edit = self.prepare(bytes)?;
+        self.apply_edit(edit);
+        Ok(())
+    }
+    pub(crate) fn prepare(&self, bytes: &[u8]) -> Result<SceneEdit, String> {
+        self.prepare_overlay(bytes, &BTreeMap::new())
+    }
+    pub(crate) fn prepare_overlay(
+        &self,
+        bytes: &[u8],
+        overlay: &BTreeMap<u32, Option<Object>>,
+    ) -> Result<SceneEdit, String> {
+        let prior = |id| overlay.get(&id).copied().unwrap_or_else(|| self.object(id));
         if !bytes.len().is_multiple_of(64) {
             return Err("Truncated command buffer".into());
-        }
-        if bytes.is_empty() {
-            self.stats = UpdateStats::default();
-            return Ok(());
         }
         let mut changes: BTreeMap<u32, Option<Object>> = BTreeMap::new();
         let mut structural = false;
@@ -93,7 +135,7 @@ impl Scene {
             if id == 0 {
                 return Err("Reserved entity ID".into());
             }
-            let current = changes.get(&id).copied().unwrap_or_else(|| self.object(id));
+            let current = changes.get(&id).copied().unwrap_or_else(|| prior(id));
             match u(0) {
                 1 => {
                     if current.is_some() {
@@ -130,12 +172,17 @@ impl Scene {
             }
         }
         if structural {
-            let lookup = |id: u32| changes.get(&id).copied().unwrap_or_else(|| self.object(id));
+            let lookup = |id: u32| changes.get(&id).copied().unwrap_or_else(|| prior(id));
             // Iterative coloring validates final hierarchy without recursion or
             // walking the same long ancestor chain once for every descendant.
             let mut states = BTreeMap::<u32, u8>::new();
             let mut path = Vec::new();
-            for &id in self.indices.keys().chain(changes.keys()) {
+            for &id in self
+                .indices
+                .keys()
+                .chain(overlay.keys())
+                .chain(changes.keys())
+            {
                 let Some(object) = lookup(id) else {
                     continue;
                 };
@@ -162,6 +209,16 @@ impl Scene {
                 }
             }
         }
+        Ok(SceneEdit {
+            changes,
+            structural,
+        })
+    }
+    pub(crate) fn apply_edit(&mut self, edit: SceneEdit) {
+        let SceneEdit {
+            changes,
+            structural,
+        } = edit;
         // Validation complete. No fallible operation modifies live scene state.
         self.stats = UpdateStats::default();
         let new_count = changes
@@ -219,7 +276,7 @@ impl Scene {
             }
         }
         if !changed {
-            return Ok(());
+            return;
         }
         if structural {
             for children in &mut self.store.children {
@@ -304,7 +361,6 @@ impl Scene {
         }
         self.revision += 1;
         self.journal.record(self.revision, instance_changes);
-        Ok(())
     }
     fn remove_instance(&mut self, slot: usize, changes: &mut InstanceChanges) {
         let Some(index) = self.store.packed_indices[slot].take() else {

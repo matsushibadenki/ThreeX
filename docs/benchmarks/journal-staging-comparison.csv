@@ -1,0 +1,9 @@
+operation,objects,before_p95_ms,after_p95_ms
+stage_apply,100,0.182917,0.001542
+journal_sync,100,7.465333,4.546917
+stage_apply,1000,1.540375,0.000500
+journal_sync,1000,7.216208,4.439208
+stage_apply,10000,16.274625,0.000584
+journal_sync,10000,26.176375,4.613958
+stage_apply,100000,158.873584,0.001416
+journal_sync,100000,156.686750,4.488208

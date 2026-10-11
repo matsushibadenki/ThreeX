@@ -1,0 +1,9 @@
+[package]
+name = "threex-storage"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+threex-core = { path = "../core" }
+[features]
+prepared = []
+group = []

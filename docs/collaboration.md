@@ -85,3 +85,48 @@ ThreeXの描画配列は密なappend/swap-remove方式になり、従来のID順
 - 🟢 [Done] 集合変更・親子表示・slot再利用・描画を飛ばした縮小のCPU同期検証。
 - 🟢 [Done] Universal変換参照テストは集合差分化後も成功。
 - ⭕️ [Pending] 描画順変更を含むGPU実描画比較。
+
+## Document保存・復旧
+
+2026-10-12にUniversal-3Dのversion=1検証、一時JSON保存→rename、保存中の文書比較によるdirty維持を確認。
+ThreeXはその所有境界を維持し、固有のbinary checkpoint v1と不変世代・CRC32・履歴復元を独立実装。
+.u3d互換の読込ではない。変換／単位／ID差を解決するimportアダプターは別工程。
+背景保存はRust側PreparedSave、保存完了はSceneStampで判定。WebViewへ全量を送らない。
+相手側ソース・roadmapは変更せず、symlink・外部include・ローカルpath依存を追加していない。
+
+- 🟢 [Done] macOSでversion・履歴・世代rollback・子プロセス終了の保存復旧テスト。
+- ⭕️ [Pending] 両アプリの文書交換、実UI、電源断とOS別durability。
+
+## 自動保存journal
+
+2026-10-12にUniversal-3DのRust editor dirty管理と明示save経路を再確認。
+ThreeXにRust AutosaveDocument所有者と独立した命令journalを実装し、UI状態所有は増やしていない。
+Universal-3D側へソース・roadmap変更は加えず、参照symlinkへの依存も追加していない。
+.u3dとの交換形式や相手側autosaveの実装を保証するものではない。
+
+- 🟢 [Done] 未保存取引・Undo/Redo・破損末尾・append／compaction中断のCPU復旧検証。
+- ⭕️ [Pending] 両アプリの実UI接続、実電源断とOS別durability。
+
+## 差分transaction staging
+
+2026-10-12にUniversal-3DのRust-owned編集とdirty/save境界を再確認。
+ThreeXは変更IDのPreparedTransactionを検証し、journal同期後に同じSceneへ適用する。
+変換・ID・Undo/Redo契約と相手側の独立参照テストは維持。相手のコードは変更せず、
+シンボリックリンク・外部include・相手リポジトリのpath依存は追加していない。
+
+- 🟢 [Done] 全Document複製廃止、Scene identity維持、無効・stale・別Document拒否、性能比較。
+- ⭕️ [Pending] 実UI接続・実電源断・GPU描画比較。
+
+## Group commit
+
+2026-10-12にUniversal-3DのRust所有・保存中のdirty維持を再確認。ThreeX側は複数の編集recordを1sync後に公開し、個別revision／Undoを維持する。相手側コードを変更せず、symlink依存も追加していない。
+
+- 🟢 [Done] group commit／正常prefix復旧とCPU＋IO計測。
+- ⭕️ [Pending] 実UI・OS別durability。
+
+## Group prefix差分化
+
+2026-10-12にUniversal-3DのRust文書所有と保存中のdirty維持を再確認。ThreeX内で変更ID overlayを実装し、先行編集の状態を後続検証へ引き継ぐ。ID・変換・Undo・復旧の契約を維持し、相手側コードは変更していない。symlink依存を追加していない。
+
+- 🟢 [Done] 依存編集・削除再作成・混在履歴の逐次参照検証と性能比較。
+- ⭕️ [Pending] 両アプリ実UI・実電源断・OS別durability。

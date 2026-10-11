@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-12 JST",
+  "architecture": "arm64",
+  "rustc": "1.99.0",
+  "release": "thin LTO",
+  "warmup": 4,
+  "samples": 24,
+  "pairs": 2,
+  "scene": "initial 100/10000 independent entities, no meshes, grows by group_size each sample",
+  "edit": "new entity creation",
+  "timing": "includes prepare/write/sync/apply, excludes setup and command creation",
+  "fsync_count": "expected code path per sample, validated nonempty group single sync hook; no syscall tracing",
+  "gpu": false,
+  "rss_measured": false,
+  "baseline_sha256": "bbc339adb27852ed192bc2b59dc9b4bafafdbe0cf54227a66b23f19732c6ce65"
+}

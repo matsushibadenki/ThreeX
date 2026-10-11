@@ -1,4 +1,9 @@
 //! Retained scene database. Commands are little-endian fixed 64-byte records.
+mod checkpoint;
+pub use checkpoint::CheckpointError;
+mod document;
+pub use document::{Document, DocumentError, DocumentSnapshot, PreparedGroup, PreparedTransaction};
+
 mod instance_updates;
 mod scene;
 pub use instance_updates::{InstanceUpdates, SceneStamp};

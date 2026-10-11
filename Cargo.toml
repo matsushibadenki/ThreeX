@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/renderer", "crates/wasm"]
+members = ["crates/core", "crates/renderer", "crates/wasm", "crates/storage"]
 resolver = "2"
 [workspace.dependencies]
 wgpu = "27.0.1"

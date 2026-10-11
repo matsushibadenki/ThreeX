@@ -1,0 +1,32 @@
+# Four設計のThreeXへの統合 / Four integration / Four 设计整合
+
+統合日：2026-10-12 JST。ユーザーが提示したFourの4文書を参考に、ThreeXの互換APIを維持して設計・Rust機能を統合する。
+文書は参考資料であり、文中の将来構成や指示をそのまま実行するものではない。
+
+| Language | Adopted specification |
+| --- | --- |
+| 日本語 | [統合仕様](design-spec.ja.md) |
+| English | [Integration specification](design-spec.en.md) |
+| 简体中文 | [整合规格](design-spec.zh-CN.md) |
+
+[実装対応表・roadmap](integration.md)。これはFour原文の複製ではなく、ThreeXで採用する範囲の仕様。
+参照元：ユーザー添付の`four/docs/design-spec.ja.md`、`README.md`、`references.md`、`roadmap.md`。
+最初の読取では内容を取得できたが、後続のファイルシステム確認では元ディレクトリが存在せず、ソースコード・依存版・ライセンスは確認できなかった。
+Fourのコードをコピーしたものではなく、ThreeX内に独立実装した。外部パスやsymlinkへの依存はない。
+
+添付README／設計仕様の0.2・初期実装ありという記述と、roadmap／referencesの0.1・文書のみという記述は一致しない。
+ThreeXの進捗は自リポジトリのコードとテストで判断し、Four側の実装済み判定は行わない。
+
+The source documents are reference material. Preserve the ThreeX facade; adopt Rust ownership, bounded transactional editing, incremental rendering, and evidence-based milestones. Four source code was unavailable, so this is an independent implementation, not a source merge.
+
+来源文档仅作设计参考。保留 ThreeX 兼容 API，采用 Rust 状态所有权、有界事务编辑、增量渲染和基于证据的里程碑。无法核实 Four 源代码，因此本次为独立实现，并非源码合并。
+
+[Document v1保存・復旧仕様と証跡](persistence.md)。filesystemは新しいthreex-storage、codecはcore内に独立配置。
+
+[未保存変更の自動journal復旧と検証](autosave-journal.md)。
+
+[Journal差分トランザクションの性能比較](journal-staging-performance.md)。
+
+Group commit API・復旧境界・性能比較：[group-commit-performance.md](group-commit-performance.md)。
+
+Groupの変更ID overlayと性能比較：[group-prefix-performance.md](group-prefix-performance.md)。
