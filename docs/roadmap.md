@@ -15,7 +15,12 @@
 🟢 [Done] Iterative cycle validation and deep hierarchy regression tests.
 🟢 [Done] SoA before/after CPU benchmark, startup/all-dynamic costs, process peak RSS.
 🟠 [Next] Generation resource handles.
-🟠 [Next] Revision-aware render deltas to remove full instance comparison/copy; incremental packing.
+🟢 [Done] Revision-aware GPU upload ranges; removed full Instance comparison/copy.
+🟢 [Done] Bounded dirty journal, skipped-update merging, independent renderer stamps, safe full-upload fallback.
+🟢 [Done] Upload-preparation before/after release benchmark and repeated all-dynamic comparisons.
+🟢 [Done] Incremental membership packing: append/swap-remove, entity-index lookup, shrink-safe dirty ranges.
+🟢 [Done] Visibility/Mesh/entity lifecycle before/after CPU and planned-upload benchmarks.
+🟠 [Next] Incremental structural validation/adjacency for entity creation/deletion (currently full hierarchy work).
 🟢 [Done] Shared material RGB changes and material replacement mark affected meshes dirty.
 🟠 [Next] Full camera behavior, Plane/Sphere geometry.
 🟢 [Done] Release CPU scene benchmark at 100 / 1k / 10k / 100k objects, before/after CSV.
@@ -26,14 +31,14 @@
 ⭕️ [Pending] Browser WASM/WebGPU visual verification and Apple GPU profiling.
 
 Historical CPU results are in benchmark-before.csv / benchmark-after.csv.
-Current SoA measurements are in benchmarks/soa-*.csv and benchmarks/soa-memory-*.json.
+Current SoA measurements are in benchmarks/soa-_.csv and benchmarks/soa-memory-_.json.
 Historical transactional-overlay results are in performance.md; current SoA results
 and limitations are in soa-performance.md. GPU/power measurements remain pending.
 
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust scene/transform tests: 12 passed in debug and release. WGSL/upload-range tests: 2 passed.
+- Rust scene/transform/journal tests: 17 passed in debug and release. WGSL validation: 1 passed.
 - JS compatibility tests: 4 passed.
 - Native GPU test: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.
@@ -45,3 +50,7 @@ and limitations are in soa-performance.md. GPU/power measurements remain pending
 - ⭕️ [Pending] Surface復旧経路のWASMビルドと実機確認。
 
 - 🟢 [Done] Universal-3D conversion and world mirror verified through the new incremental SoA path.
+
+Current upload-preparation comparisons and limits: upload-performance.md; raw data: benchmarks/upload-*.csv.
+
+Current membership packing measurements and limitations: packing-performance.md; raw data: benchmarks/packing-*.csv.

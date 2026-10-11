@@ -42,10 +42,15 @@ asset loading, Tauri windows and docking are not implemented.
 The Rust scene stores transforms and render attributes in SoA arrays, with a
 transactional changed-entity overlay and cached world matrices. Changes evaluate
 only the affected subtree. Color changes do not evaluate matrices. Cached packed
-instances are updated in place; visibility/mesh-membership changes rebuild packing.
+instances are updated in place; visibility/mesh-membership changes append or swap-remove
+only affected entries. Dense render indices are transient: use `instance_index(id)`
+to resolve an entity, and never persist a packed index or assume ID-sorted draws.
 Structural batches validate the full hierarchy and rebuild adjacency iteratively.
-The renderer still compares/copies the complete packed array before dirty-range
-GPU writes. Eliminating this remaining O(N) work is a next step.
+The renderer requests revision-aware dirty ranges and borrows only their Instance
+slices for queue writes; it does not compare or retain a full Instance snapshot.
+A bounded journal supports skipped updates and independent renderers, including
+shrinking membership. Expired history, scene switching, buffer reallocation, and
+excessively fragmented changes require a full upload.
 Internal slots are reused but never exposed. Generation-tagged resource handles
 are not implemented; JS entity IDs still never reuse.
 Surface Lost/Outdated is retried once; GPU device loss recovery and large scene
@@ -53,7 +58,7 @@ capacity checks are future work.
 
 ## Verification in this development environment
 
-Rust scene/transform tests (12), WGSL/upload-range tests (2), JS contract tests (4)
+Rust scene/transform/journal tests (16), WGSL validation (1), JS contract tests (4)
 and workspace Clippy with warnings denied passed. The Metal adapter was unavailable
 in the execution environment. The GPU integration test is explicitly ignored by
 default; run `cargo test -p threex-renderer -- --ignored` on a GPU-enabled host.
@@ -74,4 +79,16 @@ and reproduction steps are documented in `docs/soa-performance.md`.
 ```sh
 cargo run --offline --release -p threex-core --example transform_bench
 cargo run --offline --release -p threex-core --example transform_cost_bench
+```
+
+GPU-upload CPU preparation results are documented in `docs/upload-performance.md`.
+Incremental membership packing results and order contract: `docs/packing-performance.md`.
+`Scene::instance_updates_since(previous_stamp, force_full)` returns a new stamp
+and coalesced ranges. Enqueue all ranges from `Scene::instances()` before retaining
+the new stamp; failed attempts can retry from the same old stamp. Each renderer
+keeps its own stamp. A fresh/recreated GPU buffer must pass `force_full = true`.
+The former renderer `upload_ranges` byte-comparison helper was removed.
+
+```sh
+cargo run --offline --release -p threex-core --example upload_bench
 ```

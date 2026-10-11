@@ -1,4 +1,4 @@
-use threex_core::{Instance, Scene};
+use threex_core::{Instance, Scene, SceneStamp};
 use wgpu::util::DeviceExt;
 pub struct Renderer {
     pub device: wgpu::Device,
@@ -11,40 +11,9 @@ pub struct Renderer {
     bind: wgpu::BindGroup,
     capacity: usize,
     count: u32,
-    revision: Option<u64>,
-    uploaded: Vec<Instance>,
+    stamp: Option<SceneStamp>,
     depth: Option<wgpu::Texture>,
     size: (u32, u32),
-}
-// Adjacent changed instances share one upload. Compaction/reordering is detected
-// by comparing packed instance bytes; reallocations always repopulate the buffer.
-pub fn upload_ranges(
-    previous: &[Instance],
-    current: &[Instance],
-    reallocated: bool,
-) -> Vec<std::ops::Range<usize>> {
-    if current.is_empty() {
-        return Vec::new();
-    }
-    if reallocated {
-        return std::iter::once(0..current.len()).collect();
-    }
-    let mut ranges = Vec::new();
-    let mut start = None;
-    for (i, value) in current.iter().enumerate() {
-        let changed = previous
-            .get(i)
-            .is_none_or(|old| bytemuck::bytes_of(old) != bytemuck::bytes_of(value));
-        if changed {
-            start.get_or_insert(i);
-        } else if let Some(begin) = start.take() {
-            ranges.push(begin..i);
-        }
-    }
-    if let Some(begin) = start {
-        ranges.push(begin..current.len());
-    }
-    ranges
 }
 impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
@@ -132,8 +101,7 @@ impl Renderer {
             bind,
             capacity: 1,
             count: 0,
-            revision: None,
-            uploaded: Vec::new(),
+            stamp: None,
             depth: None,
             size: (0, 0),
         }
@@ -149,7 +117,7 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
-        if self.revision != Some(scene.revision) {
+        if !scene.is_current(self.stamp.as_ref()) {
             let data = scene.instances();
             let reallocated = data.len() > self.capacity;
             if reallocated {
@@ -161,17 +129,16 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
             }
-            for range in upload_ranges(&self.uploaded, data, reallocated) {
+            let updates = scene.instance_updates_since(self.stamp.as_ref(), reallocated);
+            for range in updates.ranges {
                 self.queue.write_buffer(
                     &self.instances,
                     (range.start * std::mem::size_of::<Instance>()) as u64,
                     bytemuck::cast_slice(&data[range]),
                 );
             }
-            self.uploaded.clear();
-            self.uploaded.extend_from_slice(data);
-            self.count = self.uploaded.len() as u32;
-            self.revision = Some(scene.revision);
+            self.count = data.len() as u32;
+            self.stamp = Some(updates.stamp);
         }
         self.queue
             .write_buffer(&self.camera, 0, bytemuck::cast_slice(vp));
@@ -239,27 +206,6 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn delta_uploads_and_reallocation() {
-        let instance = threex_core::Instance {
-            model: threex_core::identity(),
-            color: [1.; 4],
-        };
-        let before = vec![instance; 100_000];
-        let mut after = before.clone();
-        after[500].model[3][0] = 3.;
-        assert_eq!(super::upload_ranges(&before, &after, false), vec![500..501]);
-        assert!(super::upload_ranges(&before, &before, false).is_empty());
-        assert_eq!(
-            super::upload_ranges(&before, &after, true),
-            vec![0..100_000]
-        );
-        after[501].color[0] = 0.;
-        assert_eq!(super::upload_ranges(&before, &after, false), vec![500..502]);
-        assert!(super::upload_ranges(&before, &[], false).is_empty());
-        assert!(super::upload_ranges(&before, &before[..10], false).is_empty());
-    }
-
     #[test]
     fn shader_is_valid() {
         let module = naga::front::wgsl::parse_str(include_str!("cube.wgsl")).unwrap();

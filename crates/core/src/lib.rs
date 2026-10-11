@@ -1,5 +1,7 @@
 //! Retained scene database. Commands are little-endian fixed 64-byte records.
+mod instance_updates;
 mod scene;
+pub use instance_updates::{InstanceUpdates, SceneStamp};
 mod transform_store;
 pub use scene::{Scene, UpdateStats};
 #[derive(Clone, Copy, Debug, PartialEq)]

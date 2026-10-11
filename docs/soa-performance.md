@@ -1,5 +1,8 @@
 # SoA・ワールドTransform差分更新の性能比較
 
+この工程後、Rendererの全Instance比較・コピーは差分履歴に置き換えた。
+当時の制約と計測は下記に保存し、現在の送信準備の結果は`upload-performance.md`を参照。
+
 2026-10-11、同一の開発ホスト（macOS / arm64、Rust 1.99.0）で実施。
 
 Problem: 1件の変更でも描画データ取得時に全Objectのワールド行列を再計算し、

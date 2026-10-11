@@ -1,0 +1,21 @@
+{
+  "date_jst": "2026-10-11",
+  "profile": "release + thin LTO",
+  "sizes": [
+    100,
+    1000,
+    10000,
+    100000
+  ],
+  "warmups": 12,
+  "samples": 128,
+  "quantiles": "ceil((N-1)*p)",
+  "boundary": "apply command batches + instance upload plan; legacy also copies complete CPU snapshot; excludes wgpu queue writes and GPU execution",
+  "repeated_pairs": 3,
+  "baseline_archive_sha256": "fb123279995183f3fbb49a27f5461c3f2b48ea17a682dc60c99ba6415bdfb88f",
+  "current_benchmark_sha256": "1fbc3bb47c0a83cca94e672185c7ccf1516360cbc24c3bce120084cd620259f3",
+  "journal_revision_limit": 64,
+  "journal_range_limit": 4096,
+  "unmerged_runs_per_revision_limit": 1024,
+  "instance_size_bytes": 80
+}

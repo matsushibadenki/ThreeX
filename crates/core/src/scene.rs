@@ -1,5 +1,9 @@
 use crate::{Instance, Object, local, multiply, transform_store::TransformStore};
-use std::collections::BTreeMap;
+use crate::{
+    InstanceUpdates, SceneStamp,
+    instance_updates::{InstanceChanges, InstanceJournal},
+};
+use std::{collections::BTreeMap, sync::Arc};
 const WORLD: u8 = 1;
 const VISIBILITY: u8 = 2;
 const INSTANCE: u8 = 4;
@@ -11,6 +15,9 @@ pub struct UpdateStats {
     pub visibility_updates: usize,
     pub instance_writes: usize,
     pub packing_rebuilds: usize,
+    pub instance_additions: usize,
+    pub instance_removals: usize,
+    pub instance_moves: usize,
     pub hierarchy_rebuilds: usize,
 }
 #[derive(Default)]
@@ -18,10 +25,32 @@ pub struct Scene {
     indices: BTreeMap<u32, usize>,
     store: TransformStore,
     packed: Vec<Instance>,
+    packed_slots: Vec<usize>,
     pub revision: u64,
     stats: UpdateStats,
+    identity: Arc<()>,
+    journal: InstanceJournal,
 }
 impl Scene {
+    pub fn stamp(&self) -> SceneStamp {
+        SceneStamp {
+            identity: self.identity.clone(),
+            revision: self.revision,
+        }
+    }
+    pub fn is_current(&self, stamp: Option<&SceneStamp>) -> bool {
+        stamp.is_some_and(|stamp| {
+            stamp.revision == self.revision && Arc::ptr_eq(&stamp.identity, &self.identity)
+        })
+    }
+    pub fn instance_updates_since(
+        &self,
+        previous: Option<&SceneStamp>,
+        force_full: bool,
+    ) -> InstanceUpdates {
+        self.journal
+            .updates(self.stamp(), previous, self.packed.len(), force_full)
+    }
     pub fn len(&self) -> usize {
         self.indices.len()
     }
@@ -40,6 +69,12 @@ impl Scene {
     /// Retained render data; no allocation, matrix evaluation, or traversal.
     pub fn instances(&self) -> &[Instance] {
         &self.packed
+    }
+    /// Dense render indices are transient, never entity identifiers or draw-order keys.
+    pub fn instance_index(&self, id: u32) -> Option<usize> {
+        self.indices
+            .get(&id)
+            .and_then(|&slot| self.store.packed_indices[slot])
     }
     pub fn apply(&mut self, bytes: &[u8]) -> Result<(), String> {
         if !bytes.len().is_multiple_of(64) {
@@ -137,7 +172,7 @@ impl Scene {
             self.store.reserve_new(new_count);
         }
         let mut seeds = Vec::new();
-        let mut packing_dirty = false;
+        let mut instance_changes = InstanceChanges::new(false);
         let mut changed = false;
         for (id, value) in changes {
             let old = self.object(id);
@@ -148,8 +183,8 @@ impl Scene {
             match value {
                 None => {
                     let slot = self.indices.remove(&id).unwrap();
+                    self.remove_instance(slot, &mut instance_changes);
                     self.store.remove(slot);
-                    packing_dirty = true;
                 }
                 Some(o) => {
                     let slot = if let Some(&slot) = self.indices.get(&id) {
@@ -157,7 +192,6 @@ impl Scene {
                     } else {
                         let slot = self.store.allocate(id);
                         self.indices.insert(id, slot);
-                        packing_dirty = true;
                         slot
                     };
                     let local_dirty = old.is_none_or(|old| {
@@ -168,7 +202,6 @@ impl Scene {
                     let parent_dirty = old.is_none_or(|old| old.parent != o.parent);
                     let visibility_dirty =
                         parent_dirty || old.is_none_or(|old| old.visible != o.visible);
-                    packing_dirty |= old.is_none_or(|old| old.mesh != o.mesh);
                     self.store.write(slot, o);
                     if local_dirty {
                         self.store.locals[slot] = local(&o);
@@ -241,37 +274,52 @@ impl Scene {
                 if flags & VISIBILITY != 0 {
                     let visible = self.store.visible[slot]
                         && parent.is_none_or(|parent| self.store.world_visible[parent]);
-                    packing_dirty |= visible != self.store.world_visible[slot];
                     self.store.world_visible[slot] = visible;
                     self.stats.visibility_updates += 1;
                 }
                 self.store.dirty[slot] &= !(WORLD | VISIBILITY);
             }
         }
-        if packing_dirty {
-            self.packed.clear();
-            self.store.packed_indices.fill(None);
-            for &slot in self.indices.values() {
-                if self.store.meshes[slot] && self.store.world_visible[slot] {
-                    self.store.packed_indices[slot] = Some(self.packed.len());
-                    self.packed.push(self.instance(slot));
-                    self.stats.instance_writes += 1;
-                }
-            }
-            self.stats.packing_rebuilds = 1;
-        } else {
-            for &slot in &touched {
-                if let Some(index) = self.store.packed_indices[slot] {
+        for &slot in &touched {
+            if self.store.meshes[slot] && self.store.world_visible[slot] {
+                let index = if let Some(index) = self.store.packed_indices[slot] {
                     self.packed[index] = self.instance(slot);
-                    self.stats.instance_writes += 1;
-                }
+                    index
+                } else {
+                    let index = self.packed.len();
+                    self.packed.push(self.instance(slot));
+                    self.packed_slots.push(slot);
+                    self.store.packed_indices[slot] = Some(index);
+                    self.stats.instance_additions += 1;
+                    index
+                };
+                instance_changes.push(index);
+                self.stats.instance_writes += 1;
+            } else {
+                self.remove_instance(slot, &mut instance_changes);
             }
         }
         for slot in touched {
             self.store.dirty[slot] = 0;
         }
         self.revision += 1;
+        self.journal.record(self.revision, instance_changes);
         Ok(())
+    }
+    fn remove_instance(&mut self, slot: usize, changes: &mut InstanceChanges) {
+        let Some(index) = self.store.packed_indices[slot].take() else {
+            return;
+        };
+        self.packed.swap_remove(index);
+        self.packed_slots.swap_remove(index);
+        self.stats.instance_removals += 1;
+        if index < self.packed.len() {
+            let moved = self.packed_slots[index];
+            self.store.packed_indices[moved] = Some(index);
+            changes.push(index);
+            self.stats.instance_moves += 1;
+            self.stats.instance_writes += 1;
+        }
     }
     fn instance(&self, slot: usize) -> Instance {
         let color = self.store.colors[slot];
@@ -414,7 +462,7 @@ mod tests {
         );
     }
     #[test]
-    fn reparent_delete_and_slot_reuse_preserve_worlds_and_id_order() {
+    fn reparent_delete_and_slot_reuse_preserve_worlds_and_entity_mapping() {
         let mut scene = Scene::default();
         add(
             &mut scene,
@@ -448,7 +496,10 @@ mod tests {
             bytemuck::cast_slice::<_, u8>(&before)
         );
         add(&mut scene, &[(5, mesh(0, -4.))]);
-        assert_eq!(scene.instances()[2].model[3][0], -4.);
+        assert_eq!(
+            scene.instances()[scene.instance_index(5).unwrap()].model[3][0],
+            -4.
+        );
         assert_eq!(scene.world_transform(5).unwrap()[3][0], -4.);
         assert_eq!(scene.instances().len(), scene.len());
     }
@@ -481,7 +532,10 @@ mod tests {
         child.visible = true;
         scene.apply(&command(2, 2, child)).unwrap();
         assert_eq!(scene.instances().len(), 4);
-        assert_eq!(scene.instances()[2].model[3][0], 6.);
+        assert_eq!(
+            scene.instances()[scene.instance_index(3).unwrap()].model[3][0],
+            6.
+        );
     }
     #[test]
     fn deep_hierarchy_is_iterative() {
@@ -506,6 +560,8 @@ mod tests {
             .collect();
         add(&mut scene, &objects);
         reference.extend(objects);
+        let mut gpu = scene.instances().to_vec();
+        let mut gpu_stamp = Some(scene.stamp());
         let mut seed = 0x12345678u32;
         for step in 0..600 {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
@@ -522,7 +578,10 @@ mod tests {
             }
             reference.insert(id, o);
             scene.apply(&command(2, id, o)).unwrap();
-            let mut expected = Vec::new();
+            if step % 7 == 0 {
+                synchronize(&scene, &mut gpu_stamp, &mut gpu, false);
+            }
+            let mut expected = BTreeMap::new();
             for (&id, o) in &reference {
                 let mut chain = Vec::new();
                 let mut at = id;
@@ -542,14 +601,18 @@ mod tests {
                     assert!((a - b).abs() < 0.0001, "step {step}, entity {id}");
                 }
                 if o.mesh && visible {
-                    expected.push(Instance {
-                        model: world,
-                        color: [o.color[0], o.color[1], o.color[2], 1.],
-                    });
+                    expected.insert(
+                        id,
+                        Instance {
+                            model: world,
+                            color: [o.color[0], o.color[1], o.color[2], 1.],
+                        },
+                    );
                 }
             }
             assert_eq!(scene.instances().len(), expected.len());
-            for (a, b) in scene.instances().iter().zip(expected) {
+            for (id, b) in expected {
+                let a = &scene.instances()[scene.instance_index(id).unwrap()];
                 assert_eq!(a.color, b.color);
                 for (a, b) in a.model.iter().flatten().zip(b.model.iter().flatten()) {
                     assert!((a - b).abs() < 0.0001);
@@ -599,5 +662,176 @@ mod tests {
                 assert!((actual - expected).abs() < 0.00001);
             }
         }
+    }
+    fn synchronize(
+        scene: &Scene,
+        stamp: &mut Option<SceneStamp>,
+        target: &mut Vec<Instance>,
+        force: bool,
+    ) -> InstanceUpdates {
+        let plan = scene.instance_updates_since(stamp.as_ref(), force);
+        target.resize(
+            scene.instances().len(),
+            Instance {
+                model: crate::identity(),
+                color: [0.; 4],
+            },
+        );
+        for range in &plan.ranges {
+            target[range.clone()].copy_from_slice(&scene.instances()[range.clone()]);
+        }
+        *stamp = Some(plan.stamp.clone());
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(target),
+            bytemuck::cast_slice::<_, u8>(scene.instances())
+        );
+        plan
+    }
+    #[test]
+    fn delta_journal_merges_skipped_updates_for_independent_renderers() {
+        let mut scene = Scene::default();
+        let objects: Vec<_> = (1..=100_000).map(|id| (id, mesh(0, 0.))).collect();
+        add(&mut scene, &objects);
+        let mut fast = None;
+        let mut slow = None;
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        assert!(synchronize(&scene, &mut fast, &mut a, false).full);
+        synchronize(&scene, &mut slow, &mut b, false);
+        scene.apply(&command(2, 500, mesh(0, 2.))).unwrap();
+        assert_eq!(
+            synchronize(&scene, &mut fast, &mut a, false).ranges,
+            vec![499..500]
+        );
+        scene.apply(&command(2, 501, mesh(0, 3.))).unwrap();
+        scene.apply(&command(2, 800, mesh(0, 4.))).unwrap();
+        scene.apply(&[]).unwrap();
+        let plan = synchronize(&scene, &mut slow, &mut b, false);
+        assert!(!plan.full);
+        assert_eq!(plan.ranges, vec![499..501, 799..800]);
+        synchronize(&scene, &mut fast, &mut a, false);
+        assert!(
+            scene
+                .instance_updates_since(fast.as_ref(), false)
+                .ranges
+                .is_empty()
+        );
+        assert!(synchronize(&scene, &mut fast, &mut a, true).full);
+    }
+    #[test]
+    fn repacking_empty_growth_scene_switch_and_expired_history_are_safe() {
+        let mut scene = Scene::default();
+        add(&mut scene, &[(1, mesh(0, 1.)), (2, mesh(0, 2.))]);
+        let mut stamp = None;
+        let mut target = Vec::new();
+        synchronize(&scene, &mut stamp, &mut target, false);
+        let mut o = mesh(0, 1.);
+        o.visible = false;
+        scene.apply(&command(2, 1, o)).unwrap();
+        assert!(!synchronize(&scene, &mut stamp, &mut target, false).full);
+        assert_eq!(target.len(), 1);
+        scene.apply(&command(3, 2, Object::default())).unwrap();
+        let plan = synchronize(&scene, &mut stamp, &mut target, false);
+        assert!(!plan.full);
+        assert!(plan.ranges.is_empty());
+        assert!(target.is_empty());
+        add(&mut scene, &[(3, mesh(0, 5.))]);
+        assert!(synchronize(&scene, &mut stamp, &mut target, true).full);
+        let saved = stamp.clone();
+        for x in 6..76 {
+            scene.apply(&command(2, 3, mesh(0, x as f32))).unwrap();
+        }
+        assert!(scene.instance_updates_since(saved.as_ref(), false).full);
+        synchronize(&scene, &mut stamp, &mut target, false);
+        let mut other = Scene::default();
+        add(&mut other, &[(3, mesh(0, 99.))]);
+        assert!(!other.is_current(stamp.as_ref()));
+        assert!(synchronize(&other, &mut stamp, &mut target, false).full);
+        let mut equal_revision = Scene::default();
+        add(&mut equal_revision, &[(3, mesh(0, 100.))]);
+        assert_eq!(equal_revision.revision, other.revision);
+        assert!(!equal_revision.is_current(stamp.as_ref()));
+        assert!(synchronize(&equal_revision, &mut stamp, &mut target, false).full);
+    }
+    #[test]
+    fn membership_swaps_shrinks_and_reused_slots_sync_without_full_upload() {
+        let mut scene = Scene::default();
+        add(
+            &mut scene,
+            &(1..=100_000)
+                .map(|id| (id, mesh(0, id as f32)))
+                .collect::<Vec<_>>(),
+        );
+        let mut fast = Some(scene.stamp());
+        let mut slow = fast.clone();
+        let mut a = scene.instances().to_vec();
+        let mut b = a.clone();
+        let pointer = scene.instances().as_ptr();
+        let mut hidden = mesh(0, 1.);
+        hidden.visible = false;
+        scene.apply(&command(2, 1, hidden)).unwrap();
+        let stats = scene.update_stats();
+        assert_eq!(stats.instance_removals, 1);
+        assert_eq!(stats.instance_moves, 1);
+        assert_eq!(stats.instance_writes, 1);
+        assert_eq!(stats.packing_rebuilds, 0);
+        assert_eq!(scene.instance_index(100_000), Some(0));
+        let plan = synchronize(&scene, &mut fast, &mut a, false);
+        assert!(!plan.full);
+        assert_eq!(plan.ranges, vec![0..1]);
+        // Update the old tail, then remove it before the slow renderer catches up.
+        scene.apply(&command(2, 99_999, mesh(0, -7.))).unwrap();
+        scene.apply(&command(3, 99_999, Object::default())).unwrap();
+        assert_eq!(scene.update_stats().instance_writes, 0);
+        let plan = synchronize(&scene, &mut slow, &mut b, false);
+        assert!(!plan.full);
+        assert_eq!(plan.ranges, vec![0..1]);
+        // A delete and create in one batch reuses a SoA slot while preserving mappings.
+        scene
+            .apply(
+                &[
+                    command(3, 2, Object::default()),
+                    command(1, 100_001, Object::default()),
+                    command(2, 100_001, mesh(0, 17.)),
+                ]
+                .concat(),
+            )
+            .unwrap();
+        synchronize(&scene, &mut fast, &mut a, false);
+        synchronize(&scene, &mut slow, &mut b, false);
+        assert_eq!(scene.instance_index(2), None);
+        assert_eq!(
+            scene.instances()[scene.instance_index(100_001).unwrap()].model[3][0],
+            17.
+        );
+        assert_eq!(scene.instances().as_ptr(), pointer);
+        assert_eq!(scene.packed_slots.len(), scene.instances().len());
+        for (index, &slot) in scene.packed_slots.iter().enumerate() {
+            assert_eq!(scene.store.packed_indices[slot], Some(index));
+            assert!(scene.store.ids[slot].is_some());
+        }
+    }
+    #[test]
+    fn planned_but_failed_upload_can_retry_and_invalid_batches_do_not_alter_journal() {
+        let mut scene = Scene::default();
+        add(&mut scene, &[(1, mesh(0, 0.)), (2, mesh(0, 0.))]);
+        let stamp = scene.stamp();
+        scene.apply(&command(2, 1, mesh(0, 3.))).unwrap();
+        let plan = scene.instance_updates_since(Some(&stamp), false);
+        assert_eq!(plan.ranges, vec![0..1]);
+        assert!(scene.apply(&command(2, 1, mesh(2, 3.))).is_ok());
+        assert!(scene.apply(&command(2, 2, mesh(1, 4.))).is_err());
+        let retry = scene.instance_updates_since(Some(&stamp), false);
+        assert_eq!(retry.ranges, vec![0..1]);
+        assert!(!retry.full);
+        let mut target = vec![
+            Instance {
+                model: crate::identity(),
+                color: [1.; 4]
+            };
+            2
+        ];
+        let mut cursor = Some(stamp);
+        synchronize(&scene, &mut cursor, &mut target, false);
     }
 }

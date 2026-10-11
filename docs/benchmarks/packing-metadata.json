@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-11",
+  "os": "macOS 27.0.1 26A434",
+  "architecture": "arm64",
+  "rustc": "1.99.0 b940084d7",
+  "profile": "release thin LTO",
+  "warmup": 12,
+  "samples": 128,
+  "runs": 2,
+  "gpu": false,
+  "timed": "Scene.apply + instance_updates_since + black_box borrowed instances; command construction excluded",
+  "upload_bytes": "planned range lengths * 80; buffer reallocation excluded",
+  "instance_writes": "last apply of iteration only (skip_8 contains 8 apply calls)",
+  "baseline": "packing-baseline-core.zip independent crate; second baseline run /tmp/threex-packing-baseline",
+  "memory": "packed_slots adds one usize per retained instance capacity; 0.8MB at 100k capacity on 64-bit, Vec spare capacity extra; no RSS measurement"
+}
