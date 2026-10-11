@@ -1,0 +1,37 @@
+# Rust build artifacts (keep Cargo.lock for reproducible workspace builds)
+/target/
+**/target/
+
+# Generated wasm-pack output
+/packages/threex/wasm/
+
+# JavaScript dependencies and package-manager logs
+node_modules/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python caches
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local environment variables (keep example configuration)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# OS and editor temporary files
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# Temporary reference symlink; never a project dependency
+/Universal-3D

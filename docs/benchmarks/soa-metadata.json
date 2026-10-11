@@ -1,0 +1,15 @@
+{
+  "date_jst": "2026-10-11",
+  "baseline": "AoS BTreeMap with full world/instance rebuilding on instances()",
+  "current": "SoA with retained world/packed caches and changed-subtree evaluation",
+  "baseline_sha256": "e93458ad16bc108f879cf8021be3d25041dfadeb1d4ec93137dba9d335998222",
+  "main_benchmark_sha256": "326dd7d39887162aca8279b357a4883a85ce57f9a089e36fb161dd23d0b61b35",
+  "cost_benchmark_sha256": "598e4869b74a081fb6878705afd4d655f59151e2f37836a80fe4dc553cdf2337",
+  "profile": "release, thin LTO",
+  "main_samples": 80,
+  "main_warmups": 8,
+  "cost_samples": 20,
+  "cost_warmups": 4,
+  "measured_boundary": "apply(binary commands) + instances(); excludes JS, GPU, encoding command bytes, and draw submission",
+  "quantile": "ceil((sample_count - 1) * percentile); p99 is max at these sample counts"
+}

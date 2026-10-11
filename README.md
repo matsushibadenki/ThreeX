@@ -1,0 +1,77 @@
+# ThreeX
+
+Rust + WASM + wgpu prototype of the Three.js-compatible engine described in docs.
+This is an incremental rendering prototype, not the complete engine.
+
+## Run
+
+Install Rust's `wasm32-unknown-unknown` target and `wasm-pack`, then:
+
+```sh
+npm run build:wasm
+npm run dev
+```
+
+Open `http://localhost:8080/apps/examples/` in a browser with WebGPU enabled.
+The demo renders on resize or interaction; there is no idle animation loop.
+
+```sh
+cargo test --offline
+npm test
+```
+
+## Implemented contract
+
+Scene, Group, Object3D, Mesh, BoxGeometry, MeshBasicMaterial,
+PerspectiveCamera (translation only), WebGPURenderer.
+Transforms use XYZ Euler radians. Box dimensions are combined with object scale.
+Call `render()` after changing transforms or visibility. Structural changes reconcile
+entities; transform changes send only dirty objects. Runtime state and GPU buffers
+live in Rust. Geometry is shared; cubes render in one instanced indexed draw.
+
+Binary records are 64 bytes, little endian: opcode u32, entity u32, twelve f32
+(position, rotation, scale, RGB), flags u32 (visible=1, mesh=2), parent u32.
+Opcodes: create=1, update=2, delete=3. Entity zero is reserved. JS IDs never reuse.
+Batches are validated atomically; hierarchy cycles and missing parents are rejected.
+
+## Current limits
+
+Material RGB color changes and material replacement are tracked, including shared
+materials. Geometry mutations are not tracked; replace the mesh for these changes. Camera rotation, lookAt, lighting/PBR, GPU culling, resource pools,
+asset loading, Tauri windows and docking are not implemented.
+The Rust scene stores transforms and render attributes in SoA arrays, with a
+transactional changed-entity overlay and cached world matrices. Changes evaluate
+only the affected subtree. Color changes do not evaluate matrices. Cached packed
+instances are updated in place; visibility/mesh-membership changes rebuild packing.
+Structural batches validate the full hierarchy and rebuild adjacency iteratively.
+The renderer still compares/copies the complete packed array before dirty-range
+GPU writes. Eliminating this remaining O(N) work is a next step.
+Internal slots are reused but never exposed. Generation-tagged resource handles
+are not implemented; JS entity IDs still never reuse.
+Surface Lost/Outdated is retried once; GPU device loss recovery and large scene
+capacity checks are future work.
+
+## Verification in this development environment
+
+Rust scene/transform tests (12), WGSL/upload-range tests (2), JS contract tests (4)
+and workspace Clippy with warnings denied passed. The Metal adapter was unavailable
+in the execution environment. The GPU integration test is explicitly ignored by
+default; run `cargo test -p threex-renderer -- --ignored` on a GPU-enabled host.
+WASM target installation failed and wasm-pack is unavailable, so browser compilation
+and rendered output are pending. Native `cargo check` does not check the wasm-only module.
+
+## Rust data access and performance
+
+`Scene::instances()` now returns a borrowed `&[Instance]` from the retained cache,
+not a newly allocated `Vec`. Copy with `.to_vec()` only when independent ownership
+is necessary. `object()` and `world_transform()` return read-only value snapshots.
+`update_stats()` exposes work counts for the last successful batch. No-op batches
+do not increment scene revision. Invalid batches leave state and stats unchanged.
+
+CPU before/after comparisons, startup/all-dynamic costs, memory measurements,
+and reproduction steps are documented in `docs/soa-performance.md`.
+
+```sh
+cargo run --offline --release -p threex-core --example transform_bench
+cargo run --offline --release -p threex-core --example transform_cost_bench
+```

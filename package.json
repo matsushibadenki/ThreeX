@@ -1,0 +1,1 @@
+{"name":"threex-workspace","private":true,"type":"module","scripts":{"test":"node --test tests/compat/*.test.js","build:wasm":"wasm-pack build crates/wasm --target web --out-dir ../../packages/threex/wasm","dev":"python3 -m http.server 8080"}}

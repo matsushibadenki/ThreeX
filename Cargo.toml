@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/core", "crates/renderer", "crates/wasm"]
+resolver = "2"
+[workspace.dependencies]
+wgpu = "27.0.1"
+bytemuck = { version = "1.25", features = ["derive"] }
+[profile.release]
+lto = "thin"
