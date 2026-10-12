@@ -546,6 +546,27 @@ mod tests {
         );
     }
     #[test]
+    fn overlay_deletions_check_new_children_and_atomic_reparent() {
+        let mut d = Document::default();
+        let parent = create(90, mesh(0, 1.));
+        let child = create(1, mesh(90, 2.));
+        let delete = record(3, 90, Object::default());
+        assert!(d.prepare_group(0, &[&parent, &child, &delete]).is_err());
+        assert!(d.scene().is_empty());
+        d.apply_group(d.prepare_group(0, &[&parent, &child]).unwrap())
+            .unwrap();
+        let move_child = record(2, 1, mesh(0, 3.));
+        let combined = [delete, move_child].concat();
+        let new_child = create(2, mesh(1, 2.));
+        d.apply_group(d.prepare_group(2, &[&combined, &new_child]).unwrap())
+            .unwrap();
+        assert_eq!(d.scene().world_transform(2).unwrap()[3][0], 5.);
+        d.undo(4).unwrap();
+        d.undo(5).unwrap();
+        assert_eq!(d.scene().object(1).unwrap().parent, 90);
+        assert!(d.scene().object(90).is_some());
+    }
+    #[test]
     fn mixed_history_roundtrips_and_retained_gpu_ranges_match() {
         let mut d = Document::default();
         commit(

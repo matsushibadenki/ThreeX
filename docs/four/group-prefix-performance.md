@@ -1,3 +1,5 @@
+> 後続で構造検証と隣接表も差分化。[最新の性能・制約](structure-performance.md)を参照。
+
 # Group commitの累積prefix差分化
 
 2026-10-12 JST。グループ内で累積したコマンド列を毎回parse／検証していた処理を廃止。

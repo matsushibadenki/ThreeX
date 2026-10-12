@@ -10,6 +10,7 @@ pub(crate) struct TransformStore {
     pub colors: Vec<[f32; 3]>,
     pub parent_ids: Vec<u32>,
     pub parents: Vec<Option<usize>>,
+    pub child_positions: Vec<Option<usize>>,
     pub visible: Vec<bool>,
     pub meshes: Vec<bool>,
     pub locals: Vec<[[f32; 4]; 4]>,
@@ -32,6 +33,7 @@ impl TransformStore {
             colors,
             parent_ids,
             parents,
+            child_positions,
             visible,
             meshes,
             locals,
@@ -45,6 +47,8 @@ impl TransformStore {
     pub fn allocate(&mut self, id: u32) -> usize {
         if let Some(slot) = self.free.pop() {
             self.ids[slot] = Some(id);
+            self.parents[slot] = None;
+            self.child_positions[slot] = None;
             self.dirty[slot] = 0;
             self.packed_indices[slot] = None;
             return slot;
@@ -57,6 +61,7 @@ impl TransformStore {
         self.colors.push([1.; 3]);
         self.parent_ids.push(0);
         self.parents.push(None);
+        self.child_positions.push(None);
         self.visible.push(true);
         self.meshes.push(false);
         self.locals.push(identity());

@@ -20,3 +20,5 @@ Journal staging uses delta prepare/apply with no whole-document clone. [Performa
 Explicit commit groups synchronize once before publication and retain separate undo boundaries. [Group commit](group-commit-performance.md)。
 
 Group prefix validation now uses a changed-ID overlay; recovery semantics are preserved. [Performance](group-prefix-performance.md)。
+
+Structural validation and adjacency now update affected paths and edges only. [Performance](structure-performance.md)。

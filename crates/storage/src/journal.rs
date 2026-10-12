@@ -600,6 +600,49 @@ mod tests {
         assert!(a.commit_group(7, &vec![&[][..]; 33]).is_err());
     }
     #[test]
+    fn structural_group_tail_recovery_keeps_atomic_reparent_and_deleted_parent() {
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let parent = command(90);
+        let root = command(2);
+        let child = command(1);
+        let update = |id: u32, parent: u32| {
+            let mut b = command(id);
+            b[..4].copy_from_slice(&2u32.to_le_bytes());
+            b[56..60].copy_from_slice(&1u32.to_le_bytes());
+            b[60..64].copy_from_slice(&parent.to_le_bytes());
+            b
+        };
+        let child_batch = [child, update(1, 90)].concat();
+        a.commit_group(0, &[&parent, &root, &child_batch]).unwrap();
+        a.save().unwrap();
+        let boundary = a.valid_bytes as usize;
+        let mut delete = parent;
+        delete[..4].copy_from_slice(&3u32.to_le_bytes());
+        let reparent = [delete, update(1, 2)].concat();
+        let new_child = [command(3), update(3, 1)].concat();
+        a.commit_group(3, &[&reparent, &new_child]).unwrap();
+        drop(a);
+        let store = DocumentStore::new(&t.0);
+        let full = store.load().unwrap();
+        assert_eq!(full.document.revision(), 5);
+        assert_eq!(full.document.scene().object(3).unwrap().parent, 1);
+        assert!(full.document.scene().object(90).is_none());
+        let path = t.0.join("autosave.txj");
+        let bytes = fs::read(&path).unwrap();
+        let end = decode(&bytes, boundary, MAX_RECORD).unwrap().1;
+        fs::write(&path, &bytes[..end + 3]).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.document.revision(), 4);
+        assert_eq!(loaded.document.scene().object(1).unwrap().parent, 2);
+        assert!(loaded.document.scene().object(3).is_none());
+        assert!(loaded.document.scene().object(90).is_none());
+        let mut resumed = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        resumed.undo(4).unwrap();
+        assert_eq!(resumed.document().scene().object(1).unwrap().parent, 90);
+        assert!(resumed.document().scene().object(90).is_some());
+    }
+    #[test]
     fn group_failed_sync_retry_and_every_truncation_keep_valid_prefix() {
         for stage in 0..3 {
             let t = Temp::new();

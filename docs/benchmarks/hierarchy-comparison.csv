@@ -1,0 +1,7 @@
+objects,group_size,workload,operation,before_p95_ms,after_p95_ms
+100,,,reparent_leaf,0.003791,0.001708
+100,,,delete_recreate_leaf,0.002167,0.000417
+10000,,,reparent_leaf,0.397959,0.000584
+10000,,,delete_recreate_leaf,0.292542,0.000625
+100000,,,reparent_leaf,3.232500,0.000584
+100000,,,delete_recreate_leaf,3.470917,0.000625

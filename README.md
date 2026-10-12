@@ -45,7 +45,8 @@ only the affected subtree. Color changes do not evaluate matrices. Cached packed
 instances are updated in place; visibility/mesh-membership changes append or swap-remove
 only affected entries. Dense render indices are transient: use `instance_index(id)`
 to resolve an entity, and never persist a packed index or assume ID-sorted draws.
-Structural batches validate the full hierarchy and rebuild adjacency iteratively.
+Structural batches validate changed ancestor paths and deleted-parent references.
+Adjacency attaches/detaches only changed edges using child-position reverse indices.
 The renderer requests revision-aware dirty ranges and borrows only their Instance
 slices for queue writes; it does not compare or retain a full Instance snapshot.
 A bounded journal supports skipped updates and independent renderers, including
@@ -118,3 +119,5 @@ Journal preparation now retains only changed objects and validates before IO.
 Group commit API・復旧境界・性能比較：[docs/four/group-commit-performance.md](docs/four/group-commit-performance.md)。
 
 Groupの変更ID overlayと性能比較：[docs/four/group-prefix-performance.md](docs/four/group-prefix-performance.md)。
+
+[Incremental structural validation and adjacency performance](docs/four/structure-performance.md).

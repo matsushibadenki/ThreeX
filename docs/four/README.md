@@ -30,3 +30,5 @@ The source documents are reference material. Preserve the ThreeX facade; adopt R
 Group commit API・復旧境界・性能比較：[group-commit-performance.md](group-commit-performance.md)。
 
 Groupの変更ID overlayと性能比較：[group-prefix-performance.md](group-prefix-performance.md)。
+
+[構造編集の階層検証・隣接表差分化と性能比較](structure-performance.md)。

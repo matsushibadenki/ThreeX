@@ -20,3 +20,5 @@ FX-01 至 FX-06 保留现有二进制命令与 JS 兼容接口。
 显式提交组在一次同步后发布，并保留独立撤销边界。 [Group commit](group-commit-performance.md)。
 
 分组前缀验证已改为变更 ID 覆盖层，保持原恢复语义。 [Performance](group-prefix-performance.md)。
+
+结构验证和邻接表已改为仅更新受影响路径及边。 [Performance](structure-performance.md)。

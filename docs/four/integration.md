@@ -49,7 +49,7 @@ Document単体はメモリ内。threex-storageによる明示保存で履歴を�
 
 検証：`cargo test --offline --workspace`、`cargo test --offline --release -p threex-core`、
 `cargo clippy --offline --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、
-`node --test tests/compat/scene.test.js`。core 26件＋storage 16件、WGSL 1件、JS 4件が成功。80回の混在編集を全Undo／Redoし、snapshot内容とGPU転送計画の適用結果を検証。既存GPU試験は明示ignored。
+`node --test tests/compat/scene.test.js`。core 28件＋storage 17件、WGSL 1件、JS 4件が成功。80回の混在編集を全Undo／Redoし、snapshot内容とGPU転送計画の適用結果を検証。既存GPU試験は明示ignored。
 
 保存形式・復旧保証・プラットフォーム制限：[persistence.md](persistence.md)。
 
@@ -59,3 +59,5 @@ Document単体はメモリ内。threex-storageによる明示保存で履歴を�
 - 🟠 [Next] worker接続／時間batching・request重複排除。
 
 - 🟢 [Done] 累積prefix再検証を変更ID overlayへ差分化：[group-prefix-performance.md](group-prefix-performance.md)。
+
+- 🟢 [Done] 構造検証・隣接表差分化と親削除＋付け替えの末尾復旧：[structure-performance.md](structure-performance.md)。

@@ -22,3 +22,5 @@ journalは全Document複製なしの差分prepare/applyを採用。 [Performance
 通常編集の明示group commitを実装。個別Undo境界を維持し、一度のsync後に公開する。 [Group commit](group-commit-performance.md)。
 
 Groupの累積prefix検証を変更ID overlayへ差分化し、復旧契約を維持。 [Performance](group-prefix-performance.md)。
+
+構造編集の検証・隣接表を変更経路と辺の差分へ置換。 [Performance](structure-performance.md)。

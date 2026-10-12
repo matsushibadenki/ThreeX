@@ -19,6 +19,7 @@ pub struct UpdateStats {
     pub instance_removals: usize,
     pub instance_moves: usize,
     pub hierarchy_rebuilds: usize,
+    pub hierarchy_links: usize,
 }
 #[derive(Default)]
 pub struct Scene {
@@ -173,16 +174,34 @@ impl Scene {
         }
         if structural {
             let lookup = |id: u32| changes.get(&id).copied().unwrap_or_else(|| prior(id));
-            // Iterative coloring validates final hierarchy without recursion or
-            // walking the same long ancestor chain once for every descendant.
+            // Only deletions can orphan an unchanged child. Inspect their current children
+            // plus virtual/new edges, rather than every live entity.
+            let deleted: std::collections::BTreeSet<_> = changes
+                .iter()
+                .filter_map(|(&id, value)| value.is_none().then_some(id))
+                .collect();
+            for &id in &deleted {
+                if let Some(&slot) = self.indices.get(&id) {
+                    for &child in &self.store.children[slot] {
+                        let child_id = self.store.ids[child].unwrap();
+                        if lookup(child_id).is_some_and(|o| o.parent == id) {
+                            return Err("Missing parent".into());
+                        }
+                    }
+                }
+            }
+            for (&id, value) in overlay.iter().chain(changes.iter()) {
+                if value.is_some_and(|o| deleted.contains(&o.parent))
+                    && lookup(id).is_some_and(|o| deleted.contains(&o.parent))
+                {
+                    return Err("Missing parent".into());
+                }
+            }
+            // Every newly introduced cycle includes a changed node. Share ancestor
+            // coloring across those paths; the prior graph is already validated.
             let mut states = BTreeMap::<u32, u8>::new();
             let mut path = Vec::new();
-            for &id in self
-                .indices
-                .keys()
-                .chain(overlay.keys())
-                .chain(changes.keys())
-            {
+            for &id in changes.keys() {
                 let Some(object) = lookup(id) else {
                     continue;
                 };
@@ -227,6 +246,18 @@ impl Scene {
             .count();
         if new_count > 0 {
             self.store.reserve_new(new_count);
+        }
+        let mut attach = Vec::new();
+        if structural {
+            for (&id, &value) in &changes {
+                let old = self.object(id);
+                if old.is_some_and(|o| value.is_none_or(|new| new.parent != o.parent)) {
+                    self.detach(self.indices[&id]);
+                }
+                if value.is_some_and(|o| old.is_none_or(|old| old.parent != o.parent)) {
+                    attach.push(id);
+                }
+            }
         }
         let mut seeds = Vec::new();
         let mut instance_changes = InstanceChanges::new(false);
@@ -278,22 +309,19 @@ impl Scene {
         if !changed {
             return;
         }
-        if structural {
-            for children in &mut self.store.children {
-                children.clear();
+        for id in attach {
+            let slot = self.indices[&id];
+            let parent = self.store.parent_ids[slot];
+            self.store.parents[slot] = if parent == 0 {
+                None
+            } else {
+                Some(self.indices[&parent])
+            };
+            if let Some(parent) = self.store.parents[slot] {
+                self.store.child_positions[slot] = Some(self.store.children[parent].len());
+                self.store.children[parent].push(slot);
+                self.stats.hierarchy_links += 1;
             }
-            for &slot in self.indices.values() {
-                let parent = self.store.parent_ids[slot];
-                self.store.parents[slot] = if parent == 0 {
-                    None
-                } else {
-                    Some(self.indices[&parent])
-                };
-                if let Some(parent) = self.store.parents[slot] {
-                    self.store.children[parent].push(slot);
-                }
-            }
-            self.stats.hierarchy_rebuilds = 1;
         }
         let mut touched = Vec::new();
         let mut queue = Vec::new();
@@ -361,6 +389,16 @@ impl Scene {
         }
         self.revision += 1;
         self.journal.record(self.revision, instance_changes);
+    }
+    fn detach(&mut self, slot: usize) {
+        if let Some(parent) = self.store.parents[slot].take() {
+            let position = self.store.child_positions[slot].take().unwrap();
+            self.store.children[parent].swap_remove(position);
+            if let Some(&moved) = self.store.children[parent].get(position) {
+                self.store.child_positions[moved] = Some(position);
+            }
+            self.stats.hierarchy_links += 1;
+        }
     }
     fn remove_instance(&mut self, slot: usize, changes: &mut InstanceChanges) {
         let Some(index) = self.store.packed_indices[slot].take() else {
@@ -437,6 +475,74 @@ mod tests {
             mesh: true,
             ..Default::default()
         }
+    }
+    #[test]
+    fn incremental_links_orphans_and_slot_reuse_keep_adjacency_consistent() {
+        let mut s = Scene::default();
+        add(
+            &mut s,
+            &[
+                (1, mesh(0, 1.)),
+                (2, mesh(0, 2.)),
+                (3, mesh(1, 3.)),
+                (4, mesh(1, 4.)),
+                (5, mesh(1, 5.)),
+            ],
+        );
+        let check = |s: &Scene| {
+            for (&id, &slot) in &s.indices {
+                let o = s.object(id).unwrap();
+                match s.store.parents[slot] {
+                    Some(parent) => {
+                        let position = s.store.child_positions[slot].unwrap();
+                        assert_eq!(s.store.children[parent][position], slot);
+                        assert_eq!(s.store.ids[parent], Some(o.parent));
+                    }
+                    None => {
+                        assert_eq!(o.parent, 0);
+                        assert_eq!(s.store.child_positions[slot], None);
+                    }
+                }
+                for (position, &child) in s.store.children[slot].iter().enumerate() {
+                    assert!(s.store.ids[child].is_some());
+                    assert_eq!(s.store.parents[child], Some(slot));
+                    assert_eq!(s.store.child_positions[child], Some(position));
+                }
+            }
+        };
+        s.apply(&command(2, 3, mesh(2, 3.))).unwrap();
+        assert_eq!(s.update_stats().hierarchy_links, 2);
+        assert_eq!(s.update_stats().hierarchy_rebuilds, 0);
+        check(&s);
+        let before = s.instances().to_vec();
+        let revision = s.revision;
+        assert!(s.apply(&command(3, 1, Object::default())).is_err());
+        assert_eq!(s.revision, revision);
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&before),
+            bytemuck::cast_slice::<_, u8>(s.instances())
+        );
+        check(&s);
+        s.apply(
+            &[
+                command(3, 1, Object::default()),
+                command(3, 4, Object::default()),
+                command(2, 5, mesh(2, 5.)),
+                command(1, 6, Object::default()),
+                command(2, 6, mesh(2, 6.)),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        check(&s);
+        assert_eq!(s.world_transform(5).unwrap()[3][0], 7.);
+        for step in 0..100 {
+            let parent = if step % 2 == 0 { 2 } else { 6 };
+            s.apply(&command(2, 3, mesh(parent, 3.))).unwrap();
+            check(&s);
+        }
+        assert!(s.apply(&command(2, 2, mesh(3, 2.))).is_err());
+        check(&s);
     }
     #[test]
     fn one_leaf_and_material_do_not_rebuild_unrelated_data() {

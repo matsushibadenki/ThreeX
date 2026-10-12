@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-12 JST",
+  "architecture": "arm64",
+  "rustc": "1.99.0",
+  "profile": "release thin LTO",
+  "warmup": 4,
+  "samples": 24,
+  "group_pairs": 2,
+  "leaf_pairs": 1,
+  "group_scene": "initial 100/10000 entities, no meshes; grows each sync iteration",
+  "leaf_scene": "100/10000/100000 independent meshes; tail reparent between roots or delete/recreate",
+  "timing": "group prepare only and real journal sync; leaf Scene.apply only",
+  "gpu": false,
+  "rss_measured": false,
+  "baseline_sha256": "38956fe41cce555d83f2a0b629b669fda034346fcf7d6c33b22d5f2b31d65c62"
+}

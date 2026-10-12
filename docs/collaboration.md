@@ -130,3 +130,10 @@ ThreeXは変更IDのPreparedTransactionを検証し、journal同期後に同じS
 
 - 🟢 [Done] 依存編集・削除再作成・混在履歴の逐次参照検証と性能比較。
 - ⭕️ [Pending] 両アプリ実UI・実電源断・OS別durability。
+
+## 構造編集の差分化
+
+2026-10-12にUniversal-3DのRust文書所有と保存中のdirty判定を再確認。ThreeXの変更祖先経路検証と辺の差分更新を独立実装。親削除・子付け替え・slot再利用・Undoの契約を維持し、journal末尾の正常transaction復旧を確認。相手側ソース変更、symlink／外部include依存は追加していない。
+
+- 🟢 [Done] 構造編集差分化とCPU／同期込み性能比較。
+- ⭕️ [Pending] 相互文書交換・実UI・OS別durability。
