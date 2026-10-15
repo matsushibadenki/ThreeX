@@ -32,3 +32,17 @@ Group commit API・復旧境界・性能比較：[group-commit-performance.md](g
 Groupの変更ID overlayと性能比較：[group-prefix-performance.md](group-prefix-performance.md)。
 
 [構造編集の階層検証・隣接表差分化と性能比較](structure-performance.md)。
+
+[Rust workerとrequest結果cache・復旧保証](worker.md)。
+
+[永続Document ID・request/session protocolと移行・復旧](request-protocol.md)。
+
+- 🟢 [Done] ProtocolRequest Commit group／worker自動batch・prefix復旧・fsync性能比較：[protocol-group-performance.md](protocol-group-performance.md)。
+
+- 🟢 [Done] worker ProtocolRequest候補prefixの差分準備・復旧維持・前後CPU／実worker比較：[worker-prefix-performance.md](worker-prefix-performance.md)。
+
+- 🟢 [Done] 裸Commit worker候補prefixの差分準備・既存再送cache／復旧維持・前後比較：[bare-prefix-performance.md](bare-prefix-performance.md)。
+
+- 🟢 [Done] 意味内容hash v1・保存receipt／worker query・復旧検証：[content-hash.md](content-hash.md)。
+
+- 🟢 [Done] session終了・Active枠再利用・v3永続化と移行・終了後／restart後の再送抑止：[session-lifecycle.md](session-lifecycle.md)。

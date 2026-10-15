@@ -1,7 +1,7 @@
 //! Write-ahead transaction log with an immutable, self-contained checkpoint anchor.
 use super::*;
 use std::io::{Seek, SeekFrom};
-const MAGIC: &[u8; 8] = b"THREEXJ1";
+const MAGIC: &[u8; 8] = b"THREEXJ3";
 const MAX_LOG: u64 = 256 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024 + 21;
 fn crc(b: &[u8]) -> u32 {
@@ -46,22 +46,39 @@ impl AutosaveDocument {
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
         if !store.root.join("autosave.txj").exists() {
-            let document = match store.load_checkpoint() {
+            let mut document = match store.load_checkpoint() {
                 Ok(loaded) => loaded.document,
                 Err(StorageError::NoValidGeneration) if store.generations()?.is_empty() => {
                     Document::default()
                 }
                 Err(e) => return Err(e),
             };
+            let id = store.ensure_identity(document.document_id())?;
+            document
+                .bind_document_id(id)
+                .map_err(|_| StorageError::IdentityMismatch)?;
             replace_log(&store, &document)?;
         }
-        let (loaded, mut valid_bytes) = read_log(&store)?;
+        let (mut loaded, mut valid_bytes) = read_log(&store)?;
+        let needs_identity = loaded.document.document_id().is_none();
+        let id = store.ensure_identity(loaded.document.document_id())?;
+        loaded
+            .document
+            .bind_document_id(id)
+            .map_err(|_| StorageError::IdentityMismatch)?;
+        let mut header = Vec::new();
+        File::open(store.root.join("autosave.txj"))?
+            .take(8)
+            .read_to_end(&mut header)?;
+        let legacy = header == b"THREEXJ1" || header == b"THREEXJ2";
         // Only a writer repairs the invalid suffix. Read-only recovery never modifies files.
         if valid_bytes == 0 {
             fs::copy(
                 store.root.join("autosave.txj"),
                 store.root.join("autosave.damaged"),
             )?;
+            valid_bytes = replace_log(&store, &loaded.document)?;
+        } else if needs_identity || legacy {
             valid_bytes = replace_log(&store, &loaded.document)?;
         } else if loaded.discarded_journal_bytes > 0 {
             let file = OpenOptions::new()
@@ -98,7 +115,7 @@ impl AutosaveDocument {
         &mut self,
         expected: u64,
         commands: &[&[u8]],
-        mut hook: impl FnMut(u8) -> std::io::Result<()>,
+        hook: impl FnMut(u8) -> std::io::Result<()>,
     ) -> Result<Vec<u64>, StorageError> {
         if !self.append_ready {
             return Err(StorageError::JournalCorrupt);
@@ -107,21 +124,38 @@ impl AutosaveDocument {
             .document
             .prepare_group(expected, commands)
             .map_err(StorageError::Edit)?;
+        self.append_prepared_commits_with(group, hook)
+    }
+    pub(crate) fn append_prepared_commits(
+        &mut self,
+        group: threex_core::PreparedGroup,
+    ) -> Result<Vec<u64>, StorageError> {
+        self.append_prepared_commits_with(group, |_| Ok(()))
+    }
+    fn append_prepared_commits_with(
+        &mut self,
+        group: threex_core::PreparedGroup,
+        mut hook: impl FnMut(u8) -> std::io::Result<()>,
+    ) -> Result<Vec<u64>, StorageError> {
+        if !self.append_ready {
+            return Err(StorageError::JournalCorrupt);
+        }
+        self.document
+            .check_group(&group)
+            .map_err(StorageError::Edit)?;
         let mut bytes = Vec::new();
-        let mut base = expected;
-        let revisions = group.revisions();
-        for (&revision, &command) in revisions.iter().zip(commands) {
-            if revision != base {
-                let mut payload = vec![1];
-                payload.extend(base.to_le_bytes());
-                payload.extend(revision.to_le_bytes());
-                payload.extend(command);
-                if payload.len() > MAX_RECORD {
-                    return Err(StorageError::JournalLimit);
-                }
-                bytes.extend(frame(&payload));
+        for (expected, revision, command) in group.commits() {
+            if revision == expected {
+                continue;
             }
-            base = revision;
+            let mut payload = vec![1];
+            payload.extend(expected.to_le_bytes());
+            payload.extend(revision.to_le_bytes());
+            payload.extend(command);
+            if payload.len() > MAX_RECORD {
+                return Err(StorageError::JournalLimit);
+            }
+            bytes.extend(frame(&payload));
         }
         if self.valid_bytes + bytes.len() as u64 > MAX_LOG {
             return Err(StorageError::JournalLimit);
@@ -198,6 +232,144 @@ impl AutosaveDocument {
             .apply_prepared(prepared)
             .map_err(StorageError::Edit)
     }
+    pub(super) fn request_with(
+        &mut self,
+        request: &ProtocolRequest,
+        mut hook: impl FnMut(u8) -> std::io::Result<()>,
+    ) -> Result<ProtocolReceipt, StorageError> {
+        if !self.append_ready {
+            return Err(StorageError::JournalCorrupt);
+        }
+        if request.protocol_version != REQUEST_PROTOCOL_VERSION {
+            return Err(StorageError::UnsupportedRequestProtocol);
+        }
+        let (kind, expected, commands) = request.action.parts();
+        let prepared = match self
+            .document
+            .prepare_request(
+                request.document_id,
+                request.session_id,
+                request.sequence,
+                kind,
+                expected,
+                commands,
+            )
+            .map_err(StorageError::Request)?
+        {
+            threex_core::RequestPreparation::Replay(revision) => {
+                return Ok(ProtocolReceipt {
+                    revision,
+                    replayed: true,
+                });
+            }
+            threex_core::RequestPreparation::Pending(prepared) => prepared,
+        };
+        let revision = prepared.revision();
+        let mut payload = vec![4];
+        payload.extend(expected.to_le_bytes());
+        payload.extend(revision.to_le_bytes());
+        payload.extend(request.document_id.bytes());
+        payload.extend(request.session_id.bytes());
+        payload.extend(request.sequence.to_le_bytes());
+        payload.push(kind);
+        payload.extend(commands);
+        let bytes = frame(&payload);
+        if payload.len() > MAX_RECORD + 64 || self.valid_bytes + bytes.len() as u64 > MAX_LOG {
+            return Err(StorageError::JournalLimit);
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(self.store.root.join("autosave.txj"))?;
+        file.set_len(self.valid_bytes)?;
+        file.seek(SeekFrom::Start(self.valid_bytes))?;
+        file.write_all(&bytes[..bytes.len() / 2])?;
+        hook(0)?;
+        file.write_all(&bytes[bytes.len() / 2..])?;
+        hook(1)?;
+        file.sync_all()?;
+        hook(2)?;
+        self.valid_bytes += bytes.len() as u64;
+        self.document
+            .apply_request(prepared)
+            .map_err(StorageError::Request)?;
+        Ok(ProtocolReceipt {
+            revision,
+            replayed: false,
+        })
+    }
+    pub(super) fn request_group_with(
+        &mut self,
+        requests: &[&ProtocolRequest],
+        hook: impl FnMut(u8) -> std::io::Result<()>,
+    ) -> Result<Vec<ProtocolReceipt>, StorageError> {
+        if !self.append_ready {
+            return Err(StorageError::JournalCorrupt);
+        }
+        let prepared = crate::protocol::prepare_protocol_group(&self.document, requests)?;
+        self.append_prepared_requests_with(prepared, hook)
+    }
+    pub(crate) fn append_prepared_requests(
+        &mut self,
+        prepared: threex_core::PreparedRequestGroup,
+    ) -> Result<Vec<ProtocolReceipt>, StorageError> {
+        self.append_prepared_requests_with(prepared, |_| Ok(()))
+    }
+    fn append_prepared_requests_with(
+        &mut self,
+        prepared: threex_core::PreparedRequestGroup,
+        mut hook: impl FnMut(u8) -> std::io::Result<()>,
+    ) -> Result<Vec<ProtocolReceipt>, StorageError> {
+        if !self.append_ready {
+            return Err(StorageError::JournalCorrupt);
+        }
+        self.document
+            .check_request_group(&prepared)
+            .map_err(StorageError::Request)?;
+        let mut bytes = Vec::new();
+        for (request, revision) in prepared.pending_commits() {
+            let expected = request.expected;
+            let commands = request.commands;
+            let mut payload = vec![4];
+            payload.extend(expected.to_le_bytes());
+            payload.extend(revision.to_le_bytes());
+            payload.extend(request.document.bytes());
+            payload.extend(request.session.bytes());
+            payload.extend(request.sequence.to_le_bytes());
+            payload.push(1);
+            payload.extend(commands);
+            if payload.len() > MAX_RECORD + 64 {
+                return Err(StorageError::JournalLimit);
+            }
+            bytes.extend(frame(&payload));
+        }
+        if self.valid_bytes + bytes.len() as u64 > MAX_LOG {
+            return Err(StorageError::JournalLimit);
+        }
+        if !bytes.is_empty() {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .open(self.store.root.join("autosave.txj"))?;
+            // Same-owner retries overwrite the uncertain suffix; reopening recovers complete frames.
+            file.set_len(self.valid_bytes)?;
+            file.seek(SeekFrom::Start(self.valid_bytes))?;
+            file.write_all(&bytes[..bytes.len() / 2])?;
+            hook(0)?;
+            file.write_all(&bytes[bytes.len() / 2..])?;
+            hook(1)?;
+            file.sync_all()?;
+            hook(2)?;
+            self.valid_bytes += bytes.len() as u64;
+        }
+        self.document
+            .apply_request_group(prepared)
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(|(revision, replayed)| ProtocolReceipt { revision, replayed })
+                    .collect()
+            })
+            .map_err(StorageError::Request)
+    }
     /// Save a generation, then atomically compact the log to a checkpoint anchor.
     pub fn save(&mut self) -> Result<SaveReceipt, StorageError> {
         self.save_compact(|_| Ok(()))
@@ -271,10 +443,16 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
     if bytes.len() as u64 > MAX_LOG {
         return Err(StorageError::JournalLimit);
     }
-    if bytes.get(..7) == Some(&MAGIC[..7]) && bytes.get(..8) != Some(MAGIC.as_slice()) {
+    let legacy = bytes.get(..8) == Some(b"THREEXJ1".as_slice());
+    let v2 = bytes.get(..8) == Some(b"THREEXJ2".as_slice());
+    if bytes.get(..7) == Some(&MAGIC[..7])
+        && bytes.get(..8) != Some(MAGIC.as_slice())
+        && !legacy
+        && !v2
+    {
         return Err(StorageError::UnsupportedJournalVersion);
     }
-    if bytes.get(..8) != Some(MAGIC.as_slice()) {
+    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 {
         return fallback(store, bytes.len() as u64);
     }
     let Some((base, mut at)) = decode(&bytes, 8, MAX_BYTES as usize) else {
@@ -287,12 +465,51 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
         }
         Err(_) => return fallback(store, bytes.len() as u64),
     };
-    let base_revision = document.revision();
+    if let Some(id) = store.read_identity()? {
+        document
+            .bind_document_id(id)
+            .map_err(|_| StorageError::IdentityMismatch)?;
+    }
     let mut transactions = 0;
     while at < bytes.len() {
-        let Some((payload, end)) = decode(&bytes, at, MAX_RECORD) else {
+        let Some((payload, end)) = decode(&bytes, at, MAX_RECORD + 64) else {
             break;
         };
+        if payload.first() == Some(&4) && !legacy {
+            if payload.len() < 58 {
+                break;
+            }
+            let expected = u64::from_le_bytes(payload[1..9].try_into().unwrap());
+            let revision = u64::from_le_bytes(payload[9..17].try_into().unwrap());
+            let Some(id) = threex_core::DocumentId::from_bytes(payload[17..33].try_into().unwrap())
+            else {
+                break;
+            };
+            let Some(session) =
+                threex_core::SessionId::from_bytes(payload[33..49].try_into().unwrap())
+            else {
+                break;
+            };
+            let sequence = u64::from_le_bytes(payload[49..57].try_into().unwrap());
+            let kind = payload[57];
+            if v2 && kind > 3 {
+                break;
+            }
+            let Ok(threex_core::RequestPreparation::Pending(prepared)) =
+                document.prepare_request(id, session, sequence, kind, expected, &payload[58..])
+            else {
+                break;
+            };
+            if prepared.revision() != revision {
+                break;
+            }
+            if document.apply_request(prepared).is_err() {
+                break;
+            }
+            transactions += 1;
+            at = end;
+            continue;
+        }
         if payload.len() < 17 {
             break;
         }
@@ -317,7 +534,9 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
     // A saved generation must never be silently superseded by an older/corrupt journal.
     let generation = match store.load_checkpoint() {
         Ok(saved) => {
-            if saved.document.revision() > document.revision() {
+            if saved.document.revision() > document.revision()
+                || saved.document.request_generation() > document.request_generation()
+            {
                 return fallback(store, bytes.len() as u64);
             }
             saved.generation
@@ -330,7 +549,7 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
         LoadedDocument {
             document,
             generation,
-            recovered: discarded > 0 || transactions > 0 || base_revision > 0,
+            recovered: discarded > 0 || transactions > 0,
             journal_transactions: transactions,
             discarded_journal_bytes: discarded,
         },
@@ -809,7 +1028,7 @@ mod tests {
         );
         assert!(t.0.join("autosave.damaged").exists());
         let mut b = fs::read(&path).unwrap();
-        b[7] = b'2';
+        b[7] = b'4';
         fs::write(&path, b).unwrap();
         assert!(matches!(
             DocumentStore::new(&t.0).load(),
@@ -860,5 +1079,370 @@ mod tests {
         let loaded = DocumentStore::new(&t.0).load().unwrap();
         assert_eq!(loaded.document.revision(), 1);
         assert!(loaded.discarded_journal_bytes > 0);
+    }
+    #[test]
+    fn retained_bare_prefix_retries_after_write_failure_and_rejects_stale_before_io() {
+        fn prepare(a: &AutosaveDocument) -> threex_core::PreparedGroup {
+            let mut builder = a.document().commit_group_builder(0).unwrap();
+            for i in 0..4 {
+                builder.push(i, &command(i as u32 + 1)).unwrap();
+            }
+            builder.finish()
+        }
+        for stage in 0..3 {
+            let t = Temp::new();
+            let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+            let group = prepare(&a);
+            assert!(
+                a.append_prepared_commits_with(group, |at| if at == stage {
+                    Err(std::io::Error::other("injected append failure"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(a.document().revision(), 0);
+            assert!(a.document().scene().is_empty());
+            let group = prepare(&a);
+            a.append_prepared_commits(group).unwrap();
+            drop(a);
+            let loaded = DocumentStore::new(&t.0).load().unwrap();
+            assert_eq!(loaded.document.revision(), 4);
+            assert_eq!(loaded.journal_transactions, 4);
+        }
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let stale = prepare(&a);
+        add(&mut a, 99);
+        let before = fs::read(t.0.join("autosave.txj")).unwrap();
+        assert!(matches!(
+            a.append_prepared_commits_with(stale, |_| panic!("stale prefix performed IO")),
+            Err(StorageError::Edit(
+                threex_core::DocumentError::RevisionConflict { .. }
+            ))
+        ));
+        assert_eq!(fs::read(t.0.join("autosave.txj")).unwrap(), before);
+    }
+    #[test]
+    fn content_hash_survives_journal_compaction_and_corrupt_tail_recovery() {
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        add(&mut a, 1);
+        let saved = a.save().unwrap();
+        let original = a.document().content_hash();
+        assert_eq!(saved.content_hash, original);
+        add(&mut a, 2);
+        let unsaved = a.document().content_hash();
+        assert_ne!(unsaved, original);
+        drop(a);
+        assert_eq!(
+            DocumentStore::new(&t.0)
+                .load()
+                .unwrap()
+                .document
+                .content_hash(),
+            unsaved
+        );
+        let path = t.0.join("autosave.txj");
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, bytes).unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert_eq!(a.document().content_hash(), original);
+        add(&mut a, 3);
+        let repaired = a.document().content_hash();
+        assert_eq!(a.save().unwrap().content_hash, repaired);
+        drop(a);
+        assert_eq!(
+            DocumentStore::new(&t.0)
+                .load()
+                .unwrap()
+                .document
+                .content_hash(),
+            repaired
+        );
+    }
+    #[test]
+    fn closed_session_survives_failed_compaction_and_append_resume() {
+        for stage in 0..3 {
+            let t = Temp::new();
+            let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+            let session = threex_core::SessionId::from_bytes([94; 16]).unwrap();
+            let first = ProtocolRequest {
+                protocol_version: 1,
+                document_id: a.document().document_id().unwrap(),
+                session_id: session,
+                sequence: 1,
+                action: ProtocolAction::Commit {
+                    expected_revision: 0,
+                    commands: command(1).to_vec(),
+                },
+            };
+            a.request(&first).unwrap();
+            let close = ProtocolRequest {
+                sequence: 2,
+                action: ProtocolAction::EndSession {
+                    expected_revision: 1,
+                },
+                ..first.clone()
+            };
+            assert!(
+                a.request_with(&close, |at| if at == stage {
+                    Err(std::io::Error::other("close append failure"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(
+                a.document().session_status(session),
+                Some(threex_core::SessionStatus::Active { sequence: 1 })
+            );
+            a.request(&close).unwrap();
+            assert!(
+                a.save_compact(|at| if at == stage {
+                    Err(std::io::Error::other("close compaction failure"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            add(&mut a, 2);
+            drop(a);
+            let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+            assert_eq!(
+                a.document().session_status(session),
+                Some(threex_core::SessionStatus::Closed { sequence: 2 })
+            );
+            assert!(a.request(&first).unwrap().replayed);
+            assert!(a.request(&close).unwrap().replayed);
+            assert_eq!(a.document().scene().len(), 2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_fault_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    fn command() -> Vec<u8> {
+        let mut b = vec![0; 64];
+        b[..4].copy_from_slice(&1u32.to_le_bytes());
+        b[4..8].copy_from_slice(&1u32.to_le_bytes());
+        b
+    }
+    #[test]
+    fn request_process_exit_and_every_truncated_suffix_are_atomic() {
+        if let Ok(path) = std::env::var("THREEX_REQUEST_CRASH") {
+            let stage = std::env::var("THREEX_REQUEST_STAGE")
+                .unwrap()
+                .parse::<u8>()
+                .unwrap();
+            let mut a = AutosaveDocument::open(DocumentStore::new(&path)).unwrap();
+            let request = ProtocolRequest {
+                protocol_version: 1,
+                document_id: a.document().document_id().unwrap(),
+                session_id: threex_core::SessionId::from_bytes([1; 16]).unwrap(),
+                sequence: 1,
+                action: ProtocolAction::Commit {
+                    expected_revision: 0,
+                    commands: command(),
+                },
+            };
+            a.request_with(&request, |at| {
+                if at == stage {
+                    std::process::exit(80)
+                }
+                Ok(())
+            })
+            .unwrap();
+            panic!("missed crash");
+        }
+        for stage in 0..3 {
+            let p = std::env::temp_dir().join(format!(
+                "threex-request-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let status=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","journal::request_fault_tests::request_process_exit_and_every_truncated_suffix_are_atomic"])
+                .env("THREEX_REQUEST_CRASH",&p).env("THREEX_REQUEST_STAGE",stage.to_string()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
+            assert_eq!(status.code(), Some(80));
+            let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+            let r = ProtocolRequest {
+                protocol_version: 1,
+                document_id: a.document().document_id().unwrap(),
+                session_id: threex_core::SessionId::from_bytes([1; 16]).unwrap(),
+                sequence: 1,
+                action: ProtocolAction::Commit {
+                    expected_revision: 0,
+                    commands: command(),
+                },
+            };
+            let receipt = a.request(&r).unwrap();
+            assert_eq!(receipt.replayed, stage != 0);
+            assert_eq!(a.document().revision(), 1);
+            a.save().unwrap();
+            drop(a);
+            let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+            assert!(a.request(&r).unwrap().replayed);
+            drop(a);
+            fs::remove_dir_all(p).unwrap();
+        }
+        let p = std::env::temp_dir().join(format!("threex-request-tail-{}", std::process::id()));
+        let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+        let boundary = a.valid_bytes as usize;
+        let r = ProtocolRequest {
+            protocol_version: 1,
+            document_id: a.document().document_id().unwrap(),
+            session_id: threex_core::SessionId::from_bytes([2; 16]).unwrap(),
+            sequence: 1,
+            action: ProtocolAction::Commit {
+                expected_revision: 0,
+                commands: command(),
+            },
+        };
+        a.request(&r).unwrap();
+        drop(a);
+        let path = p.join("autosave.txj");
+        let bytes = fs::read(&path).unwrap();
+        for end in boundary..bytes.len() {
+            fs::write(&path, &bytes[..end]).unwrap();
+            let d = DocumentStore::new(&p).load().unwrap().document;
+            assert_eq!(d.revision(), 0);
+            assert_eq!(d.request_generation(), 0);
+        }
+        fs::write(&path, &bytes).unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+        assert!(a.request(&r).unwrap().replayed);
+        drop(a);
+        fs::remove_dir_all(p).unwrap();
+    }
+    #[test]
+    fn noop_receipt_saved_before_interrupted_compaction_is_not_lost() {
+        let p = std::env::temp_dir().join(format!("threex-noop-receipt-{}", std::process::id()));
+        let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+        let base = a.valid_bytes;
+        let r = ProtocolRequest {
+            protocol_version: 1,
+            document_id: a.document().document_id().unwrap(),
+            session_id: threex_core::SessionId::from_bytes([3; 16]).unwrap(),
+            sequence: 1,
+            action: ProtocolAction::Commit {
+                expected_revision: 0,
+                commands: vec![],
+            },
+        };
+        a.request(&r).unwrap();
+        a.store
+            .save_locked(PreparedSave::capture(a.document()).unwrap(), |_| Ok(()))
+            .unwrap();
+        drop(a);
+        let f = OpenOptions::new()
+            .write(true)
+            .open(p.join("autosave.txj"))
+            .unwrap();
+        f.set_len(base).unwrap();
+        drop(f);
+        let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+        assert!(a.request(&r).unwrap().replayed);
+        assert_eq!(a.document().revision(), 0);
+        drop(a);
+        fs::remove_dir_all(p).unwrap();
+    }
+    #[test]
+    fn noop_group_receipts_survive_compaction_failure_and_append_retry() {
+        for stage in 0..3 {
+            let p = std::env::temp_dir().join(format!(
+                "threex-noop-group-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+            let requests = (1..=4)
+                .map(|sequence| ProtocolRequest {
+                    protocol_version: 1,
+                    document_id: a.document().document_id().unwrap(),
+                    session_id: threex_core::SessionId::from_bytes([31; 16]).unwrap(),
+                    sequence,
+                    action: ProtocolAction::Commit {
+                        expected_revision: 0,
+                        commands: vec![],
+                    },
+                })
+                .collect::<Vec<_>>();
+            a.request_group(&requests.iter().collect::<Vec<_>>())
+                .unwrap();
+            assert!(
+                a.save_compact(|at| if at == stage {
+                    Err(std::io::Error::other("injected compaction failure"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            let extra = ProtocolRequest {
+                sequence: 5,
+                ..requests[0].clone()
+            };
+            a.request_group(&[&extra]).unwrap();
+            drop(a);
+            let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+            assert!(
+                a.request_group(
+                    &requests
+                        .iter()
+                        .chain(std::iter::once(&extra))
+                        .collect::<Vec<_>>()
+                )
+                .unwrap()
+                .iter()
+                .all(|r| r.replayed)
+            );
+            assert_eq!(a.document().revision(), 0);
+            assert_eq!(a.document().session_sequence(extra.session_id), Some(5));
+            drop(a);
+            fs::remove_dir_all(p).unwrap();
+        }
+    }
+    #[test]
+    fn stale_prepared_worker_prefix_is_rejected_before_journal_io() {
+        let p = std::env::temp_dir().join(format!(
+            "threex-stale-prefix-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut a = AutosaveDocument::open(DocumentStore::new(&p)).unwrap();
+        let first = ProtocolRequest {
+            protocol_version: 1,
+            document_id: a.document().document_id().unwrap(),
+            session_id: threex_core::SessionId::from_bytes([53; 16]).unwrap(),
+            sequence: 1,
+            action: ProtocolAction::Commit {
+                expected_revision: 0,
+                commands: command(),
+            },
+        };
+        let mut builder = a.document().request_group_builder().unwrap();
+        crate::protocol::push_protocol_candidate(&mut builder, &first).unwrap();
+        let prepared = builder.finish();
+        let noop = ProtocolRequest {
+            session_id: threex_core::SessionId::from_bytes([54; 16]).unwrap(),
+            action: ProtocolAction::Commit {
+                expected_revision: 0,
+                commands: vec![],
+            },
+            ..first
+        };
+        a.request(&noop).unwrap();
+        let before = fs::read(p.join("autosave.txj")).unwrap();
+        assert!(matches!(
+            a.append_prepared_requests_with(prepared, |_| panic!("stale prefix wrote journal")),
+            Err(StorageError::Request(threex_core::RequestError::Expired))
+        ));
+        assert_eq!(fs::read(p.join("autosave.txj")).unwrap(), before);
+        assert_eq!(a.document().revision(), 0);
+        drop(a);
+        fs::remove_dir_all(p).unwrap();
     }
 }

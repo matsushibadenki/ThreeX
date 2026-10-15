@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-15 JST",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.2\n",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n",
+  "baseline_sha256": "403a8a2c622c0b73b1b41282a1f70dbe9bbcc77cae8635608018d73e017e8b78",
+  "profile": "release, thin LTO",
+  "runs": 2,
+  "warmups": 4,
+  "samples": 24,
+  "cpu": "old bare worker algorithm model: prepare prefixes 1..N plus final prepare; new commit builder: N pushes and finish. 32 preparations/sample, divided by 32. Includes initial command-slice allocation amortized over 32; excludes transport checks and IO.",
+  "worker": "actual bare Commit submit-to-all-replies latency; batch/queue size 32, batch window 2 ms; includes queue/window, write/sync, apply. Startup, seeding/checkpoint, request creation, shutdown/recovery excluded.",
+  "statistics": "median of two per-run medians/quantiles, not pooled; p99 equals observed max; substantial OS/scheduling/CPU noise visible in raw runs",
+  "sync": "unchanged: one journal sync per changed group, zero for no-op groups. Bare transport cache remains live-worker only; durable deduplication requires ProtocolRequest."
+}

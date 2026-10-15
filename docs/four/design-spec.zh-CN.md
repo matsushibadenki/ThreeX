@@ -1,3 +1,5 @@
+> 2026-10-15: [Content hash v1 implemented / 意味内容hash実装 / 内容 hash 已实现](content-hash.md)。
+
 # 采用的 Four 整合规格
 
 FX-01 至 FX-06 保留现有二进制命令与 JS 兼容接口。
@@ -22,3 +24,17 @@ FX-01 至 FX-06 保留现有二进制命令与 JS 兼容接口。
 分组前缀验证已改为变更 ID 覆盖层，保持原恢复语义。 [Performance](group-prefix-performance.md)。
 
 结构验证和邻接表已改为仅更新受影响路径及边。 [Performance](structure-performance.md)。
+
+2026-10-14：已实现 Rust worker、有界队列、时间／数量批处理和当前会话请求去重。Tauri／渲染器接线与永久请求／会话身份留待后续。 [Worker](worker.md)。
+
+已实现永久文档身份、请求／会话 v1、检查点／日志 v2 迁移及重启后请求去重。Tauri IPC 留待后续。 [Protocol](request-protocol.md)。
+
+协议 Commit 分组与 worker 批处理共用一次同步，保留独立结果／撤销和持久化正常前缀恢复。[性能与限制](protocol-group-performance.md)。
+
+worker 协议候选保留已验证差分并直接写入已准备的分组，保持重启去重及恢复。[CPU 与 worker 测量](worker-prefix-performance.md)。
+
+裸 Commit 的 worker 候选也采用差分准备并直接写入已准备分组，保留当前 worker 重发缓存及恢复边界。[性能与验证](bare-prefix-performance.md)。
+
+已实现编辑内容 hash v1，支持 Document／快照、保存结果及 worker 显式查询，保留原有版本／请求校验。[规范与验证](content-hash.md)。
+
+已实现会话生命周期，v3 检查点／日志持久化关闭记录并回收活动名额，兼容迁移 v1／v2，验证关闭及重启后的重发去重。[规范](session-lifecycle.md)。

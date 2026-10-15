@@ -1,3 +1,9 @@
+> 現行checkpoint／journalはv3。v1／v2読込とsession終了記録の移行を実装。[最新仕様](session-lifecycle.md)。
+
+> 意味内容hash v1を実装。checkpoint format v2は維持し、保存receiptと明示queryにhashを返す。[最新仕様](content-hash.md)。
+
+> 保存形式の現行版はcheckpoint／journal v2です。[永続IDと再送protocol](request-protocol.md)を参照。以下のv1仕様は導入時の記録です。
+
 > この世代保存レポートの後、未保存変更のjournal復旧を実装。最新の仕様・制約は [autosave-journal.md](autosave-journal.md) を参照。
 
 # バージョン付きDocument保存と復旧

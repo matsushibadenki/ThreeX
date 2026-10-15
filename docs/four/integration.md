@@ -18,7 +18,7 @@
 - 🟢 [Done] FX-01〜05のRustサービス、既存Scene差分経路との接続。
 - 🟢 [Done] 競合・無効編集・容量拒否・親子削除復元・no-op・分岐・安定IDのテスト。
 - 🟢 [Done] version付き保存・読込、世代復旧、IO障害／プロセス終了テスト（persistence.md）。
-- 🟠 [Next] 永続Document ID、意味内容hash、移行。
+- 🟢 [Done] 永続Document ID、v1移行、意味内容hash v1。
 - 🟠 [Next] Tauriホストの単一書込経路、version付きIPC、request重複排除、エラー翻訳。
 - 🔴 [Later] WorkspaceStateレイアウト木、surface移動の取引、独立評価world。
 - 🔴 [Later] メッシュ局所編集・GPU culling・streaming。既存roadmapと重複開発しない。
@@ -49,7 +49,7 @@ Document単体はメモリ内。threex-storageによる明示保存で履歴を�
 
 検証：`cargo test --offline --workspace`、`cargo test --offline --release -p threex-core`、
 `cargo clippy --offline --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、
-`node --test tests/compat/scene.test.js`。core 28件＋storage 17件、WGSL 1件、JS 4件が成功。80回の混在編集を全Undo／Redoし、snapshot内容とGPU転送計画の適用結果を検証。既存GPU試験は明示ignored。
+`node --test tests/compat/scene.test.js`。core 29件＋storage 30件、WGSL 1件、JS 4件が成功。80回の混在編集を全Undo／Redoし、snapshot内容とGPU転送計画の適用結果を検証。既存GPU試験は明示ignored。
 
 保存形式・復旧保証・プラットフォーム制限：[persistence.md](persistence.md)。
 
@@ -61,3 +61,18 @@ Document単体はメモリ内。threex-storageによる明示保存で履歴を�
 - 🟢 [Done] 累積prefix再検証を変更ID overlayへ差分化：[group-prefix-performance.md](group-prefix-performance.md)。
 
 - 🟢 [Done] 構造検証・隣接表差分化と親削除＋付け替えの末尾復旧：[structure-performance.md](structure-performance.md)。
+
+- 🟢 [Done] Rust worker／有界queue／session内request重複排除：[worker.md](worker.md)。
+- 🟠 [Next] Tauri async境界、永続request/session、Renderer接続。
+
+- 🟢 [Done] 永続ID／request sessionと再起動後の再送抑止：[request-protocol.md](request-protocol.md)。
+
+- 🟢 [Done] ProtocolRequest Commit group／worker自動batch・prefix復旧・fsync性能比較：[protocol-group-performance.md](protocol-group-performance.md)。
+
+- 🟢 [Done] worker ProtocolRequest候補prefixの差分準備・復旧維持・前後CPU／実worker比較：[worker-prefix-performance.md](worker-prefix-performance.md)。
+
+- 🟢 [Done] 裸Commit worker候補prefixの差分準備・既存再送cache／復旧維持・前後比較：[bare-prefix-performance.md](bare-prefix-performance.md)。
+
+- 🟢 [Done] 意味内容hash v1・保存receipt／worker query・復旧検証：[content-hash.md](content-hash.md)。
+
+- 🟢 [Done] session終了・Active枠再利用・v3永続化と移行・終了後／restart後の再送抑止：[session-lifecycle.md](session-lifecycle.md)。

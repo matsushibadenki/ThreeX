@@ -1,0 +1,19 @@
+{
+  "measured_date": "2026-10-14 JST",
+  "recorded_utc": "2026-10-14T06:58:43.450268+00:00",
+  "host": "aarch64-apple-darwin",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.2\n",
+  "profile": "release, thin LTO",
+  "runs": 2,
+  "warmups": 4,
+  "samples_per_case_per_run": 24,
+  "summary": "median of the two per-run medians; not a pooled distribution",
+  "baseline": "source snapshot immediately before implementation, including the same benchmark",
+  "baseline_zip_sha256": "6c80e03b063955bcf56f8f17e7f6c43ecd659a0a7d211bff9bcf82e35bd4929e",
+  "journal_sync_measurement": "expected sync_all calls in CSV; hook after sync_all independently verifies 1/8/32 -> 1, replay-only -> 0",
+  "filesystem": "OS temp directory on this macOS host; no external disk/OS comparison",
+  "excluded": "seeding, checkpoint/compaction, startup, envelope allocation, worker queue/window, restart/replay",
+  "workload": "1/8/32 dependent create requests in one session, 100/10000 seeded objects, 64 bytes per request",
+  "limits": "24 samples make p99 the observed max; file sync latency has OS/background noise; no real power-loss claim"
+}

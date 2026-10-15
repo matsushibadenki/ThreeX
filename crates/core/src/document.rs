@@ -25,6 +25,8 @@ impl Edit {
 /// Single Rust writer; renderers borrow Scene without owning editing history.
 /// Object IDs survive undo. History is bounded and rejects oversized edits before mutation.
 pub struct Document {
+    pub(crate) id: Option<crate::DocumentId>,
+    pub(crate) ledger: crate::request::RequestLedger,
     pub(crate) scene: Scene,
     pub(crate) undo: Vec<Edit>,
     pub(crate) redo: Vec<Edit>,
@@ -49,6 +51,17 @@ impl PreparedGroup {
         self.plans.iter().map(|p| p.revision).collect()
     }
 }
+impl PreparedGroup {
+    /// Validated (expected revision, applied revision, command bytes) in input order.
+    pub fn commits(&self) -> impl Iterator<Item = (u64, u64, &[u8])> {
+        self.plans.iter().map(|p| {
+            let PreparedHistory::Commit(edit) = &p.history else {
+                unreachable!("group plans are commits")
+            };
+            (p.stamp.revision, p.revision, edit.forward.as_slice())
+        })
+    }
+}
 enum PreparedHistory {
     Commit(Edit),
     Undo,
@@ -67,6 +80,8 @@ impl Default for Document {
 impl Document {
     pub fn new(history_limit: usize, command_limit: usize) -> Self {
         Self {
+            id: None,
+            ledger: Default::default(),
             scene: Scene::default(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -170,88 +185,44 @@ impl Document {
         expected: u64,
         commands: &[&[u8]],
     ) -> Result<PreparedGroup, DocumentError> {
+        self.prepare_group_expected(expected, commands, None)
+    }
+    pub(crate) fn prepare_group_expected(
+        &self,
+        expected: u64,
+        commands: &[&[u8]],
+        expected_revisions: Option<&[u64]>,
+    ) -> Result<PreparedGroup, DocumentError> {
         self.check_revision(expected)?;
         if commands.len() > 32 || commands.iter().map(|b| b.len()).sum::<usize>() > 1024 * 1024 {
             return Err(DocumentError::CommandTooLarge);
         }
-        let mut overlay = BTreeMap::new();
-        let mut plans: Vec<PreparedTransaction> = Vec::new();
-        let mut revision = expected;
-        for &bytes in commands {
-            if bytes.len() > self.command_limit || !bytes.len().is_multiple_of(64) {
-                return Err(DocumentError::CommandTooLarge);
-            }
-            let lookup = |id| {
-                overlay
-                    .get(&id)
-                    .copied()
-                    .unwrap_or_else(|| self.scene.object(id))
-            };
-            let mut before = BTreeMap::new();
-            let mut exists = BTreeMap::new();
-            for c in bytes.as_chunks::<64>().0 {
-                let op = u32::from_le_bytes(c[..4].try_into().unwrap());
-                let id = u32::from_le_bytes(c[4..8].try_into().unwrap());
-                before.entry(id).or_insert_with(|| lookup(id));
-                let present = exists.entry(id).or_insert(before[&id].is_some());
-                match op {
-                    1 => *present = true,
-                    3 => *present = false,
-                    _ => {}
-                }
-            }
-            let mut inverse = Vec::new();
-            for (&id, &old) in &before {
-                match (old, exists[&id]) {
-                    (Some(o), true) => inverse.extend(record(2, id, o)),
-                    (Some(o), false) => {
-                        inverse.extend(record(1, id, o));
-                        inverse.extend(record(2, id, o));
-                    }
-                    (None, true) => inverse.extend(record(3, id, Object::default())),
-                    (None, false) => {}
-                }
-            }
-            if bytes.len() + inverse.len() > self.history_limit {
-                return Err(DocumentError::HistoryCapacity);
-            }
-            let scene = self
-                .scene
-                .prepare_overlay(bytes, &overlay)
-                .map_err(DocumentError::InvalidCommand)?;
-            let changed = scene.changes_overlay(&self.scene, &overlay);
-            scene.extend_overlay(&mut overlay);
-            let mut stamp = self.scene.stamp();
-            stamp.revision = revision;
-            if changed {
-                revision = revision
-                    .checked_add(1)
-                    .ok_or(DocumentError::RevisionExhausted)?;
-                if revision == u64::MAX {
-                    return Err(DocumentError::RevisionExhausted);
-                }
-            }
-            plans.push(PreparedTransaction {
-                stamp,
-                scene,
-                revision,
-                history: PreparedHistory::Commit(Edit {
-                    forward: bytes.to_vec(),
-                    inverse,
-                }),
-            });
+        let mut builder = CommitGroupBuilder::new(self);
+        for (index, &bytes) in commands.iter().enumerate() {
+            let revision = expected_revisions.map_or(builder.revision, |r| r[index]);
+            builder.push(revision, bytes)?;
         }
-        Ok(PreparedGroup {
-            stamp: self.scene.stamp(),
-            plans,
-        })
+        Ok(builder.finish())
     }
-    pub fn apply_group(&mut self, group: PreparedGroup) -> Result<Vec<u64>, DocumentError> {
+    /// Check source Scene identity/revision before a host writes the prepared group.
+    pub fn check_group(&self, group: &PreparedGroup) -> Result<(), DocumentError> {
         if !self.scene.is_current(Some(&group.stamp)) {
             return Err(DocumentError::RevisionConflict {
                 current: self.revision(),
             });
         }
+        Ok(())
+    }
+    /// Retain a validated bare-commit prefix; failed pushes leave the prefix unchanged.
+    pub fn commit_group_builder(
+        &self,
+        expected: u64,
+    ) -> Result<CommitGroupBuilder<'_>, DocumentError> {
+        self.check_revision(expected)?;
+        Ok(CommitGroupBuilder::new(self))
+    }
+    pub fn apply_group(&mut self, group: PreparedGroup) -> Result<Vec<u64>, DocumentError> {
+        self.check_group(&group)?;
         group
             .plans
             .into_iter()
@@ -356,6 +327,117 @@ pub(crate) fn record(op: u32, id: u32, o: Object) -> [u8; 64] {
         b[8 + i * 4..12 + i * 4].copy_from_slice(&value.to_le_bytes());
     }
     b
+}
+
+/// Retained virtual scene/history prefix. Failed pushes leave the accepted prefix unchanged.
+pub struct CommitGroupBuilder<'a> {
+    document: &'a Document,
+    overlay: BTreeMap<u32, Option<Object>>,
+    plans: Vec<PreparedTransaction>,
+    pub(crate) revision: u64,
+    bytes: usize,
+}
+impl<'a> CommitGroupBuilder<'a> {
+    pub(crate) fn new(document: &'a Document) -> Self {
+        Self {
+            document,
+            overlay: BTreeMap::new(),
+            plans: Vec::new(),
+            revision: document.revision(),
+            bytes: 0,
+        }
+    }
+    pub fn push(&mut self, expected: u64, bytes: &[u8]) -> Result<u64, DocumentError> {
+        if expected != self.revision {
+            return Err(DocumentError::RevisionConflict {
+                current: self.revision,
+            });
+        }
+        if expected == u64::MAX {
+            return Err(DocumentError::RevisionExhausted);
+        }
+        if self.plans.len() >= 32
+            || self.bytes + bytes.len() > 1024 * 1024
+            || bytes.len() > self.document.command_limit
+            || !bytes.len().is_multiple_of(64)
+        {
+            return Err(DocumentError::CommandTooLarge);
+        }
+        let lookup = |id| {
+            self.overlay
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| self.document.scene.object(id))
+        };
+        let mut before = BTreeMap::new();
+        let mut exists = BTreeMap::new();
+        for c in bytes.as_chunks::<64>().0 {
+            let op = u32::from_le_bytes(c[..4].try_into().unwrap());
+            let id = u32::from_le_bytes(c[4..8].try_into().unwrap());
+            before.entry(id).or_insert_with(|| lookup(id));
+            let present = exists.entry(id).or_insert(before[&id].is_some());
+            match op {
+                1 => *present = true,
+                3 => *present = false,
+                _ => {}
+            }
+        }
+        let mut inverse = Vec::new();
+        for (&id, &old) in &before {
+            match (old, exists[&id]) {
+                (Some(o), true) => inverse.extend(record(2, id, o)),
+                (Some(o), false) => {
+                    inverse.extend(record(1, id, o));
+                    inverse.extend(record(2, id, o));
+                }
+                (None, true) => inverse.extend(record(3, id, Object::default())),
+                (None, false) => {}
+            }
+        }
+        if bytes.len() + inverse.len() > self.document.history_limit {
+            return Err(DocumentError::HistoryCapacity);
+        }
+        let scene = self
+            .document
+            .scene
+            .prepare_overlay(bytes, &self.overlay)
+            .map_err(DocumentError::InvalidCommand)?;
+        let changed = scene.changes_overlay(&self.document.scene, &self.overlay);
+        let mut stamp = self.document.scene.stamp();
+        stamp.revision = self.revision;
+        let revision = if changed {
+            let revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(DocumentError::RevisionExhausted)?;
+            if revision == u64::MAX {
+                return Err(DocumentError::RevisionExhausted);
+            }
+            revision
+        } else {
+            self.revision
+        };
+
+        scene.extend_overlay(&mut self.overlay);
+        self.plans.push(PreparedTransaction {
+            stamp,
+            scene,
+            revision,
+            history: PreparedHistory::Commit(Edit {
+                forward: bytes.to_vec(),
+                inverse,
+            }),
+        });
+        self.revision = revision;
+        self.bytes += bytes.len();
+        Ok(revision)
+    }
+    pub fn finish(self) -> PreparedGroup {
+        PreparedGroup {
+            stamp: self.document.scene.stamp(),
+            plans: self.plans,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -641,5 +723,61 @@ mod tests {
         assert!(d.scene().instances().is_empty());
         d.undo(d.revision()).unwrap();
         assert_eq!(d.scene().instances().len(), 1);
+    }
+    #[test]
+    fn incremental_bare_prefix_rejects_orphan_without_losing_noop_or_undo_boundaries() {
+        let mut d = Document::default();
+        let mut reference = Document::default();
+        let parent = record(1, 1, Object::default());
+        let child = [
+            record(1, 2, Object::default()),
+            record(
+                2,
+                2,
+                Object {
+                    parent: 1,
+                    ..Default::default()
+                },
+            ),
+        ]
+        .concat();
+        let orphan = record(3, 1, Object::default());
+        let remove = [
+            record(3, 2, Object::default()),
+            record(3, 1, Object::default()),
+        ]
+        .concat();
+        let mut builder = d.commit_group_builder(0).unwrap();
+        assert_eq!(builder.push(0, &parent).unwrap(), 1);
+        assert_eq!(builder.push(1, &[]).unwrap(), 1);
+        assert!(builder.push(0, &child).is_err());
+        assert_eq!(builder.push(1, &child).unwrap(), 2);
+        assert!(builder.push(2, &orphan).is_err());
+        assert_eq!(builder.push(2, &remove).unwrap(), 3);
+        let prepared = builder.finish();
+        assert_eq!(prepared.revisions(), vec![1, 1, 2, 3]);
+        assert_eq!(d.revision(), 0);
+        assert!(d.scene().is_empty());
+        d.apply_group(prepared).unwrap();
+        for (expected, commands) in [
+            (0, parent.as_slice()),
+            (1, &[]),
+            (1, child.as_slice()),
+            (2, remove.as_slice()),
+        ] {
+            reference.commit(expected, commands).unwrap();
+        }
+        assert_eq!(d.checkpoint().unwrap(), reference.checkpoint().unwrap());
+        d.undo(3).unwrap();
+        assert_eq!(d.scene().object(2).unwrap().parent, 1);
+        let mut builder = d.commit_group_builder(4).unwrap();
+        for _ in 0..31 {
+            builder.push(4, &[]).unwrap();
+        }
+        let oversized = vec![0; 1024 * 1024 + 64];
+        assert!(builder.push(4, &oversized).is_err());
+        builder.push(4, &[]).unwrap();
+        assert!(builder.push(4, &[]).is_err());
+        assert_eq!(builder.finish().revisions().len(), 32);
     }
 }

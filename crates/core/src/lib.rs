@@ -1,8 +1,18 @@
 //! Retained scene database. Commands are little-endian fixed 64-byte records.
+mod content_hash;
+pub use content_hash::{CONTENT_HASH_VERSION, ContentHash};
 mod checkpoint;
 pub use checkpoint::CheckpointError;
 mod document;
-pub use document::{Document, DocumentError, DocumentSnapshot, PreparedGroup, PreparedTransaction};
+mod request;
+pub use document::{
+    CommitGroupBuilder, Document, DocumentError, DocumentSnapshot, PreparedGroup,
+    PreparedTransaction,
+};
+pub use request::{
+    DocumentId, MAX_SESSION_RECORDS, PreparedRequest, PreparedRequestGroup, RequestCommit,
+    RequestError, RequestGroupBuilder, RequestPreparation, SessionId, SessionStatus,
+};
 
 mod instance_updates;
 mod scene;

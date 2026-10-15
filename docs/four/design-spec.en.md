@@ -1,3 +1,5 @@
+> 2026-10-15: [Content hash v1 implemented / 意味内容hash実装 / 内容 hash 已实现](content-hash.md)。
+
 # Adopted Four integration specification
 
 FX-01 through FX-06 preserve the existing binary commands and JS facade.
@@ -22,3 +24,17 @@ Explicit commit groups synchronize once before publication and retain separate u
 Group prefix validation now uses a changed-ID overlay; recovery semantics are preserved. [Performance](group-prefix-performance.md)。
 
 Structural validation and adjacency now update affected paths and edges only. [Performance](structure-performance.md)。
+
+2026-10-14: Rust worker, bounded queue, time/count batching and live-session request deduplication are implemented. Tauri/renderer wiring and durable request/session identity remain future work. [Worker](worker.md)。
+
+Persistent document identity, request/session v1, checkpoint/journal v2 migration and restart deduplication are implemented. Tauri IPC remains future work. [Protocol](request-protocol.md)。
+
+Protocol Commit groups and worker batching now share one sync with individual receipts/Undo and durable valid-prefix recovery. [Performance and limits](protocol-group-performance.md).
+
+Worker Protocol candidates retain validated deltas and journal their opaque prepared group directly; restart deduplication and recovery are preserved. [CPU and worker measurements](worker-prefix-performance.md).
+
+Bare Commit worker candidates also retain validated deltas and journal prepared groups directly, preserving live-worker replay cache and recovery boundaries. [Performance](bare-prefix-performance.md).
+
+Semantic content hash v1 is implemented for Document/snapshots, captured save receipts and explicit worker queries. Revision/request guards remain unchanged. [Specification](content-hash.md).
+
+Session lifecycle now persists closure/tombstones in checkpoint/journal v3, reclaims active slots, migrates v1/v2 and prevents stale requests from reapplying after close/restart. [Specification](session-lifecycle.md).

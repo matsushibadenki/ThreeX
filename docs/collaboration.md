@@ -137,3 +137,84 @@ ThreeXは変更IDのPreparedTransactionを検証し、journal同期後に同じS
 
 - 🟢 [Done] 構造編集差分化とCPU／同期込み性能比較。
 - ⭕️ [Pending] 相互文書交換・実UI・OS別durability。
+
+## Rust worker接続
+
+2026-10-14にUniversal-3DのRust App State／Editor所有とsaveのdirty判定を参照。
+ThreeXはウインドウ非依存のworker clientを用意し、Document／journal正本は専用Rust workerで所有する。
+コマンドと小さい状態のみをメッセージ化し、Instance／frame全量をUIへ送る経路は追加していない。
+相手側ソース・roadmapは変更せず、symlinkや相手repositoryへのpath依存を追加していない。
+
+- 🟢 [Done] native Rust workerとsession内再送重複排除のheadless検証。
+- ⭕️ [Pending] Tauriウインドウ・wgpu Rendererへの実機接続。
+
+## 永続IDと再送protocol
+
+2026-10-14にUniversal-3Dの文書versionと文書内u64 Object IDを参照。ThreeXは別の128bit Document／Session IDを導入し、文書内Object IDとは区別する。変換式・既存Object ID・Rust所有は維持。相手repositoryへのコード変更・symlink依存は追加していない。.u3dとの自動交換や相手側request protocol互換は未実装。
+
+- 🟢 [Done] 文書IDの永続化とnative restart後の同一request再送抑止。
+- ⭕️ [Pending] 両アプリ実UI・文書交換・Tauri protocol接続。
+
+## ProtocolRequest group commit
+
+2026-10-14にUniversal-3Dの`save_document`を再確認。Rust Editorのsnapshotを保存し、保存完了時に
+現在Documentとの一致を確かめる設計を参照した。ThreeXでは単一Rust ownerを維持し、groupの編集とreceiptを
+同期後に公開する。UIへframe／Instance配列を送らず、Document ID・revision・receiptと小さい状態を返す。
+.u3d形式やUniversal-3Dのコードは変更せず、相手側にprotocol互換性があるとは仮定しない。
+
+- 🟢 [Done] Protocol Commit group、worker自動batch、再起動後のprefix重複排除・同期回数／性能比較。
+- ⭕️ [Pending] 相手アプリを含む実UI／文書交換の統合検証。
+
+シンボリックリンクは参照のみ。import、include、Cargo path、実行時アクセスへの依存を追加していない。
+詳細：[four/protocol-group-performance.md](four/protocol-group-performance.md)。
+
+## worker候補prefix差分準備
+
+2026-10-15にUniversal-3DのRust Editor／非同期保存時のsnapshot一致判定を再確認。
+ThreeXは単一Rust ownerで未公開の候補差分を保持し、Scene・request metadataの一致をIO前に確認する。
+UIへは命令・小さいstate／receiptのみを返し、GPU／frame全量の通信を追加していない。
+相手側ソースは参照のみで変更していない。相手の保存形式／request protocolとの直接互換性は仮定しない。
+
+- 🟢 [Done] worker ProtocolRequest候補差分・再送／復旧維持・前後性能比較。
+- ⭕️ [Pending] Universal-3Dとの実UI／文書交換統合検証。
+
+シンボリックリンクへのCargo path・import・include・実行時依存は追加していない。
+[仕様と実測](four/worker-prefix-performance.md)。
+
+## 裸Commit worker候補差分
+
+2026-10-15にUniversal-3Dの非同期保存時のRust Editor snapshot一致判定を参照。
+ThreeXはRust Document所有を維持し、受理済みcommand／Undo差分から直接journalを生成して
+Scene identity／revisionをIO前に検証する。ウインドウへの通信は命令・小さいstateの契約のまま。
+
+- 🟢 [Done] 裸Commit候補差分・live-worker再送cache／復旧維持・前後性能比較。
+- ⭕️ [Pending] Universal-3Dとの実UI／文書交換統合検証。
+
+相手側ソースは参照のみ。相手保存形式／protocolとの直接互換性は仮定せず、
+シンボリックリンクへのCargo path・import・include・実行時依存は追加していない。
+[仕様・性能](four/bare-prefix-performance.md)。
+
+## 意味内容hash
+
+2026-10-15。Universal-3DのRust Editorによる保存snapshot比較を参照し、ThreeXでも保存captureに
+現在の意味内容hashを結び付けた。SHA-256一致だけでdirty／revision／receipt guardを置換していない。
+相手の.u3d serializationとのhash一致は仕様に含めず、ThreeXの正規化schema v1を明示する。
+
+- 🟢 [Done] 意味内容hash、保存receipt・worker照会・復旧検証。
+- ⭕️ [Pending] 相手アプリを含む実UI／文書交換検証。
+
+相手ソースは参照のみ。シンボリックリンク依存を追加していない。
+[仕様](four/content-hash.md)。
+
+## session lifecycle
+
+2026-10-15。Universal-3DのRust Editor所有とsnapshot保存・dirty判定の境界を参照。
+ThreeXのsession終了は文書属性を変更せず、Rustの永続request metadataで管理する。
+window閉鎖／通信切断を勝手に終了と解釈せず、明示EndSessionを単一workerで処理する。
+相手側に同protocolを仮定せず、相手ソース／保存形式を変更していない。
+
+- 🟢 [Done] 永続session終了とActive枠再利用、終了後／再起動後の再送抑止。
+- ⭕️ [Pending] 実UIの切断／終了・文書交換との連携。
+
+シンボリックリンクへのCargo path・import・include・実行時依存は追加していない。
+[仕様・復旧検証](four/session-lifecycle.md)。

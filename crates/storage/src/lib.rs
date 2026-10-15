@@ -1,5 +1,10 @@
 //! Native persistence host. Document format lives in core; filesystem stays here.
+mod identity;
 mod journal;
+mod protocol;
+pub use identity::new_session_id;
+pub use protocol::{ProtocolAction, ProtocolReceipt, ProtocolRequest, REQUEST_PROTOCOL_VERSION};
+mod worker;
 pub use journal::AutosaveDocument;
 use std::{
     fs::{self, File, OpenOptions},
@@ -7,6 +12,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use threex_core::{CheckpointError, Document, SceneStamp};
+pub use worker::{
+    JournalWorker, RejectedRequest, WorkerAction, WorkerClient, WorkerCode, WorkerConfig,
+    WorkerFailure, WorkerOutcome, WorkerReply, WorkerRequest, WorkerStartError, WorkerState,
+};
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
 #[derive(Debug)]
 pub enum StorageError {
@@ -19,6 +28,9 @@ pub enum StorageError {
     StaleSave { latest_revision: u64 },
     JournalActive,
     JournalCorrupt,
+    IdentityMismatch,
+    UnsupportedRequestProtocol,
+    Request(threex_core::RequestError),
     UnsupportedJournalVersion,
     JournalLimit,
     Edit(threex_core::DocumentError),
@@ -38,17 +50,24 @@ pub struct PreparedSave {
     bytes: Vec<u8>,
     stamp: SceneStamp,
     revision: u64,
+    request_generation: u128,
+    content_hash: threex_core::ContentHash,
 }
 impl PreparedSave {
     pub fn capture(document: &Document) -> Result<Self, StorageError> {
         Ok(Self {
             bytes: document.checkpoint()?,
+            content_hash: document.content_hash(),
             stamp: document.scene().stamp(),
             revision: document.revision(),
+            request_generation: document.request_generation(),
         })
     }
 }
 pub struct SaveReceipt {
+    pub content_hash: threex_core::ContentHash,
+    pub document_id: threex_core::DocumentId,
+    pub request_generation: u128,
     pub generation: u64,
     pub revision: u64,
     stamp: SceneStamp,
@@ -56,6 +75,10 @@ pub struct SaveReceipt {
 impl SaveReceipt {
     pub fn is_current(&self, document: &Document) -> bool {
         document.scene().is_current(Some(&self.stamp))
+            && document
+                .document_id()
+                .is_none_or(|id| id == self.document_id)
+            && document.request_generation() == self.request_generation
     }
 }
 pub struct LoadedDocument {
@@ -146,7 +169,13 @@ impl DocumentStore {
         if bytes.len() as u64 > MAX_BYTES {
             return Err(StorageError::Format(CheckpointError::TooLarge));
         }
-        Ok(Document::from_checkpoint(&bytes)?)
+        let mut document = Document::from_checkpoint(&bytes)?;
+        if let Some(id) = self.read_identity()? {
+            document
+                .bind_document_id(id)
+                .map_err(|_| StorageError::IdentityMismatch)?;
+        }
+        Ok(document)
     }
     fn save_with(
         &self,
@@ -173,16 +202,28 @@ impl DocumentStore {
     }
     fn save_locked(
         &self,
-        prepared: PreparedSave,
+        mut prepared: PreparedSave,
         mut hook: impl FnMut(Stage) -> std::io::Result<()>,
     ) -> Result<SaveReceipt, StorageError> {
+        let mut document = Document::from_checkpoint(&prepared.bytes)?;
+        let id = self.ensure_identity(document.document_id())?;
+        if document.document_id().is_none() {
+            document
+                .bind_document_id(id)
+                .map_err(|_| StorageError::IdentityMismatch)?;
+            prepared.bytes = document.checkpoint()?;
+        }
+        let request_generation = document.request_generation();
         let generations = self.generations()?;
         // Never downgrade/overwrite a newer schema. Recoverable corruption is allowed.
         let mut valid = Vec::new();
         for &g in generations.iter().rev() {
             match self.read(g) {
                 Ok(document) => {
-                    if valid.is_empty() && document.revision() > prepared.revision {
+                    if valid.is_empty()
+                        && (document.revision() > prepared.revision
+                            || document.request_generation() > request_generation)
+                    {
                         return Err(StorageError::StaleSave {
                             latest_revision: document.revision(),
                         });
@@ -232,6 +273,9 @@ impl DocumentStore {
             }
         }
         Ok(SaveReceipt {
+            content_hash: prepared.content_hash,
+            document_id: id,
+            request_generation: prepared.request_generation,
             generation,
             revision: prepared.revision,
             stamp: prepared.stamp,
@@ -414,15 +458,15 @@ mod tests {
         let receipt = store.save(&d).unwrap();
         let path = store.path(receipt.generation);
         let mut b = fs::read(&path).unwrap();
-        b[8..12].copy_from_slice(&2u32.to_le_bytes());
+        b[8..12].copy_from_slice(&4u32.to_le_bytes());
         fs::write(&path, &b).unwrap();
         assert!(matches!(
             store.load(),
-            Err(StorageError::Format(CheckpointError::UnsupportedVersion(2)))
+            Err(StorageError::Format(CheckpointError::UnsupportedVersion(4)))
         ));
         assert!(matches!(
             store.save(&d),
-            Err(StorageError::Format(CheckpointError::UnsupportedVersion(2)))
+            Err(StorageError::Format(CheckpointError::UnsupportedVersion(4)))
         ));
         assert_eq!(fs::read(path).unwrap(), b);
         let lock = OpenOptions::new()
@@ -465,5 +509,26 @@ mod tests {
         let r = store.save(&d).unwrap();
         fs::write(store.path(r.generation), b"corrupt").unwrap();
         assert!(matches!(store.load(), Err(StorageError::NoValidGeneration)));
+    }
+    #[test]
+    fn save_receipt_hash_tracks_frozen_content_without_weakening_revision_guards() {
+        let temp = Temp::new();
+        let store = DocumentStore::new(&temp.0);
+        let mut d = Document::default();
+        create(&mut d, 1);
+        let original = d.content_hash();
+        let pending = PreparedSave::capture(&d).unwrap();
+        create(&mut d, 2);
+        assert_ne!(d.content_hash(), original);
+        let receipt = store.save_prepared(pending).unwrap();
+        assert_eq!(receipt.content_hash, original);
+        assert!(!receipt.is_current(&d));
+        assert_eq!(store.load().unwrap().document.content_hash(), original);
+        d.undo(2).unwrap();
+        assert_eq!(d.content_hash(), original);
+        assert!(!receipt.is_current(&d));
+        let current = store.save(&d).unwrap();
+        assert!(current.is_current(&d));
+        assert_eq!(current.content_hash, original);
     }
 }

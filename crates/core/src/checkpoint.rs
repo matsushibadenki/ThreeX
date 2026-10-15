@@ -11,7 +11,7 @@ pub enum CheckpointError {
     InvalidScene(String),
 }
 const MAGIC: &[u8; 8] = b"THREEXD\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 3;
 pub const MAX_CHECKPOINT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_HISTORY: usize = 8 * 1024 * 1024;
 const MAX_COMMAND: usize = 256 * 1024;
@@ -27,7 +27,7 @@ fn checksum(bytes: &[u8]) -> u32 {
     !crc
 }
 impl Document {
-    /// Version 1: stable IDs, complete attributes, revision, bounded undo and redo.
+    /// Version 3: durable closed-session tombstones plus document identity, session watermarks, receipts, scene and bounded history.
     /// No GPU indices, renderer stamps or OS handles are persisted.
     pub fn checkpoint(&self) -> Result<Vec<u8>, CheckpointError> {
         if self.scene.len() > MAX_OBJECTS
@@ -59,6 +59,22 @@ impl Document {
             b.extend(&e.forward);
             b.extend(&e.inverse);
         }
+        b.extend(self.id.map_or([0; 16], |id| id.bytes()));
+        b.extend((self.ledger.sessions.len() as u64).to_le_bytes());
+        for (session, highest) in &self.ledger.sessions {
+            b.extend(session.bytes());
+            b.extend(highest.to_le_bytes());
+            b.push(u8::from(self.ledger.closed.contains(session)));
+        }
+        b.extend((self.ledger.receipts.len() as u64).to_le_bytes());
+        for r in &self.ledger.receipts {
+            b.extend(r.session.bytes());
+            for value in [r.sequence, r.expected, r.revision, r.commands.len() as u64] {
+                b.extend(value.to_le_bytes())
+            }
+            b.push(r.kind);
+            b.extend(&r.commands);
+        }
         if b.len() + 4 > MAX_CHECKPOINT_BYTES {
             return Err(CheckpointError::TooLarge);
         }
@@ -74,7 +90,7 @@ impl Document {
             return Err(CheckpointError::Corrupt);
         }
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(CheckpointError::UnsupportedVersion(version));
         }
         let end = bytes.len() - 4;
@@ -134,6 +150,83 @@ impl Document {
                 document.undo.push(edit)
             } else {
                 document.redo.push(edit)
+            }
+        }
+        if version >= 2 {
+            document.id = crate::DocumentId::from_bytes(r.take(16)?.try_into().unwrap());
+            let sessions = r.size(if version == 2 {
+                64
+            } else {
+                crate::MAX_SESSION_RECORDS
+            })?;
+            for _ in 0..sessions {
+                let id = crate::SessionId::from_bytes(r.take(16)?.try_into().unwrap())
+                    .ok_or(CheckpointError::Corrupt)?;
+                let high = r.u64()?;
+                if version >= 3 {
+                    match r.take(1)?[0] {
+                        0 => {}
+                        1 => {
+                            document.ledger.closed.insert(id);
+                        }
+                        _ => return Err(CheckpointError::Corrupt),
+                    }
+                }
+                if high == 0 || document.ledger.sessions.insert(id, high).is_some() {
+                    return Err(CheckpointError::Corrupt);
+                }
+            }
+            if sessions - document.ledger.closed.len() > 64 {
+                return Err(CheckpointError::Corrupt);
+            }
+            let receipts = r.size(64)?;
+            let mut keys = std::collections::BTreeSet::new();
+            for _ in 0..receipts {
+                let session = crate::SessionId::from_bytes(r.take(16)?.try_into().unwrap())
+                    .ok_or(CheckpointError::Corrupt)?;
+                let sequence = r.u64()?;
+                let expected = r.u64()?;
+                let revision = r.u64()?;
+                let count = r.size(MAX_COMMAND)?;
+                let kind = r.take(1)?[0];
+                if sequence == 0
+                    || !keys.insert((session, sequence))
+                    || document
+                        .ledger
+                        .sessions
+                        .get(&session)
+                        .is_none_or(|&high| sequence > high)
+                    || revision > document.revision()
+                    || (expected != revision && expected.checked_add(1) != Some(revision))
+                    || !(1..=if version >= 3 { 4 } else { 3 }).contains(&kind)
+                    || (kind == 4
+                        && (expected != revision
+                            || !document.ledger.closed.contains(&session)
+                            || document.ledger.sessions[&session] != sequence))
+                    || (document.ledger.closed.contains(&session)
+                        && document.ledger.sessions[&session] == sequence
+                        && kind != 4)
+                    || (kind != 1 && count != 0)
+                    || !count.is_multiple_of(64)
+                {
+                    return Err(CheckpointError::Corrupt);
+                }
+                document.ledger.bytes += count;
+                if document.ledger.bytes > MAX_HISTORY {
+                    return Err(CheckpointError::TooLarge);
+                }
+                let commands = r.take(count)?.to_vec();
+                document.ledger.receipts.push_back(crate::request::Receipt {
+                    session,
+                    sequence,
+                    kind,
+                    expected,
+                    revision,
+                    commands,
+                });
+            }
+            if sessions > 0 && document.id.is_none() {
+                return Err(CheckpointError::Corrupt);
             }
         }
         if r.at != r.bytes.len() {
@@ -211,6 +304,34 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_v1_import_and_v2_identity_binding_roundtrip() {
+        let mut d = Document::default();
+        d.commit(0, &record(1, 42, crate::Object::default()))
+            .unwrap();
+        let mut bytes = d.checkpoint().unwrap();
+        bytes.truncate(bytes.len() - 36);
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes.extend(checksum(&bytes).to_le_bytes());
+        let mut old = Document::from_checkpoint(&bytes).unwrap();
+        assert_eq!(old.document_id(), None);
+        assert_eq!(old.snapshot(), d.snapshot());
+        let id = crate::DocumentId::from_bytes([8; 16]).unwrap();
+        old.bind_document_id(id).unwrap();
+        assert!(
+            old.bind_document_id(crate::DocumentId::from_bytes([7; 16]).unwrap())
+                .is_err()
+        );
+        let new = Document::from_checkpoint(&old.checkpoint().unwrap()).unwrap();
+        assert_eq!(new.document_id(), Some(id));
+        assert_eq!(new.snapshot(), d.snapshot());
+        assert_eq!(id.to_string().parse::<crate::DocumentId>(), Ok(id));
+        assert!(
+            "00000000000000000000000000000000"
+                .parse::<crate::DocumentId>()
+                .is_err()
+        );
+    }
+    #[test]
     fn roundtrip_history_and_fresh_scene_identity() {
         let mut d = Document::default();
         let a = record(1, 1, crate::Object::default());
@@ -284,10 +405,10 @@ mod tests {
             Err(CheckpointError::Corrupt)
         ));
         let mut b = bytes.clone();
-        b[8..12].copy_from_slice(&2u32.to_le_bytes());
+        b[8..12].copy_from_slice(&4u32.to_le_bytes());
         assert!(matches!(
             Document::from_checkpoint(&b),
-            Err(CheckpointError::UnsupportedVersion(2))
+            Err(CheckpointError::UnsupportedVersion(4))
         ));
         let mut b = bytes.clone();
         b[36..44].copy_from_slice(&u64::MAX.to_le_bytes());
@@ -298,5 +419,53 @@ mod tests {
             Document::from_checkpoint(&b),
             Err(CheckpointError::TooLarge)
         ));
+    }
+    #[test]
+    fn v2_sessions_migrate_active_and_v3_closed_flags_are_validated() {
+        let mut d = Document::default();
+        let id = crate::DocumentId::from_bytes([81; 16]).unwrap();
+        d.bind_document_id(id).unwrap();
+        let s = crate::SessionId::from_bytes([82; 16]).unwrap();
+        let crate::RequestPreparation::Pending(p) = d.prepare_request(id, s, 1, 1, 0, &[]).unwrap()
+        else {
+            panic!()
+        };
+        d.apply_request(p).unwrap();
+        let original = d.checkpoint().unwrap();
+        // Empty scene/history: session flag offset = header60 + ID16 + count8 + session16 + high8.
+        let flag = 108;
+        assert_eq!(original[flag], 0);
+        let mut legacy = original[..original.len() - 4].to_vec();
+        legacy.remove(flag);
+        legacy[8..12].copy_from_slice(&2u32.to_le_bytes());
+        legacy.extend(checksum(&legacy).to_le_bytes());
+        let mut restored = Document::from_checkpoint(&legacy).unwrap();
+        assert_eq!(
+            restored.session_status(s),
+            Some(crate::SessionStatus::Active { sequence: 1 })
+        );
+        let crate::RequestPreparation::Pending(p) =
+            restored.prepare_request(id, s, 2, 4, 0, &[]).unwrap()
+        else {
+            panic!()
+        };
+        restored.apply_request(p).unwrap();
+        let closed = restored.checkpoint().unwrap();
+        assert_eq!(
+            Document::from_checkpoint(&closed)
+                .unwrap()
+                .session_status(s),
+            Some(crate::SessionStatus::Closed { sequence: 2 })
+        );
+        for value in [2, 255] {
+            let mut corrupt = original[..original.len() - 4].to_vec();
+            corrupt[flag] = value;
+            corrupt.extend(checksum(&corrupt).to_le_bytes());
+            assert!(Document::from_checkpoint(&corrupt).is_err());
+        }
+        let mut corrupt = closed[..closed.len() - 4].to_vec();
+        corrupt[flag] = 0;
+        corrupt.extend(checksum(&corrupt).to_le_bytes());
+        assert!(Document::from_checkpoint(&corrupt).is_err());
     }
 }

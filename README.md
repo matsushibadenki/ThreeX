@@ -121,3 +121,25 @@ Group commit API・復旧境界・性能比較：[docs/four/group-commit-perform
 Groupの変更ID overlayと性能比較：[docs/four/group-prefix-performance.md](docs/four/group-prefix-performance.md)。
 
 [Incremental structural validation and adjacency performance](docs/four/structure-performance.md).
+
+Rust `threex_storage::JournalWorker` owns the document/journal on a dedicated
+thread. Window-independent clients submit bounded requests; compatible edits
+are grouped, and duplicate IDs return cached results within the live session.
+See [worker API and limits](docs/four/worker.md). Tauri/renderer wiring remains future work.
+
+Durable `ProtocolRequest` uses persistent document/session identity and sequence
+receipts. Restart retries return the original revision without reapplying; expired
+receipts are rejected using persistent watermarks. Legacy bare worker actions keep
+their live-session contract. [Protocol and migration guarantees](docs/four/request-protocol.md).
+
+Protocol Commit envelopes support `AutosaveDocument::request_group` and automatic
+worker batching: one journal sync, separate receipts/Undo boundaries, valid-prefix
+recovery and durable restart deduplication. [Benchmarks and limits](docs/four/protocol-group-performance.md).
+
+- 🟢 [Done] worker ProtocolRequest候補prefixの差分準備・復旧維持・前後CPU／実worker比較：[docs/four/worker-prefix-performance.md](docs/four/worker-prefix-performance.md)。
+
+- 🟢 [Done] 裸Commit worker候補prefixの差分準備・既存再送cache／復旧維持・前後比較：[docs/four/bare-prefix-performance.md](docs/four/bare-prefix-performance.md)。
+
+- 🟢 [Done] 意味内容hash v1・保存receipt／worker query・復旧検証：[docs/four/content-hash.md](docs/four/content-hash.md)。
+
+- 🟢 [Done] session終了・Active枠再利用・v3永続化と移行・終了後／restart後の再送抑止：[docs/four/session-lifecycle.md](docs/four/session-lifecycle.md)。

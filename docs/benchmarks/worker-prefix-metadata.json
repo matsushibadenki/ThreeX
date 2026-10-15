@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-15 JST",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.2\n",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n",
+  "baseline_sha256": "cf7fe2b5c97c8982592e3e0999e6177fe80c35d4caedd00c225e5403fbf535f9",
+  "profile": "release, thin LTO",
+  "runs": 2,
+  "warmups": 4,
+  "samples_per_case": 24,
+  "candidate_cpu": "32 preparations/sample divided by 32; models old worker prefix lengths 1..N plus final prepare, versus new builder N pushes and finish. Excludes transport cache/version conversion and I/O. Includes amortized initial input conversion.",
+  "worker_sync": "actual JournalWorker submit to all replies; 2 ms batch window, 32 batch/queue capacity, includes queue/window/write/sync/apply; excludes seed/checkpoint/startup/request allocation/shutdown",
+  "workloads": "100/10000 seeded objects; 1/8/32 new same-session requests; create_each or create_then_update_same_object; 64 bytes/request",
+  "statistics": "median of two per-run medians and per-run quantiles; not pooled; p99 equals observed max with 24 samples",
+  "sync_calls": "unchanged: one per accepted new-request group; replay-only zero, tested by existing sync hooks and worker state",
+  "limits": "CPU model is not isolated timing instrumentation inside Service. fsync and scheduling dominate end-to-end. No physical power loss/other OS/GUI benchmark."
+}

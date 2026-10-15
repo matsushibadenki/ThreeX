@@ -1,3 +1,5 @@
+> 2026-10-15: [Content hash v1 implemented / 意味内容hash実装 / 内容 hash 已实现](content-hash.md)。
+
 # Fourから採用する統合仕様
 
 仕様ID：FX-01〜FX-06。ThreeXの既存バイナリコマンドとJS facadeを維持する。
@@ -24,3 +26,17 @@ journalは全Document複製なしの差分prepare/applyを採用。 [Performance
 Groupの累積prefix検証を変更ID overlayへ差分化し、復旧契約を維持。 [Performance](group-prefix-performance.md)。
 
 構造編集の検証・隣接表を変更経路と辺の差分へ置換。 [Performance](structure-performance.md)。
+
+2026-10-14：Rust workerと有界queue、時間／件数batching、session内request重複排除を実装。Tauri・Renderer接続と永続request/sessionは後続。 [Worker](worker.md)。
+
+永続Document IDとrequest/session v1、checkpoint／journal v2移行、再起動後の再送抑止を実装。Tauri IPCは後続。 [Protocol](request-protocol.md)。
+
+ProtocolRequest Commitを最大32件／1 MiBでgroup commitし、workerも自動併合する。個別receipt・Undo・正常prefix復旧・restart後の重複排除を維持。[同期回数・性能](protocol-group-performance.md)。
+
+workerのProtocolRequest候補は受理済み差分を保持して追加候補のみを検証し、その準備結果をjournalへ直接渡す。[性能・復旧検証](worker-prefix-performance.md)。
+
+裸Commitのworker候補も差分準備し、prepared groupを直接journalへ渡す。live-worker cache／復旧境界は維持。[性能・検証](bare-prefix-performance.md)。
+
+意味内容hash v1を実装。Document／snapshot・保存receipt・worker明示queryに対応し、既存のrevision／request guardを維持。[仕様と検証](content-hash.md)。
+
+session lifecycleを実装。明示終了・Active枠再利用と有界終了記録をcheckpoint／journal v3へ永続化し、旧v1／v2移行と終了後／restart後の再送抑止を検証。[仕様](session-lifecycle.md)。
