@@ -43,6 +43,12 @@ pub struct ProtocolReceipt {
     pub revision: u64,
     pub replayed: bool,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtocolFailure {
+    pub error: threex_core::DocumentError,
+    pub revision: u64,
+    pub replayed: bool,
+}
 impl AutosaveDocument {
     pub fn request(&mut self, request: &ProtocolRequest) -> Result<ProtocolReceipt, StorageError> {
         self.request_with(request, |_| Ok(()))
@@ -314,7 +320,7 @@ mod tests {
         drop(a);
         assert_eq!(
             &fs::read(t.0.join("autosave.txj")).unwrap()[..8],
-            b"THREEXJ3"
+            b"THREEXJ4"
         );
         let a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
         assert_eq!(a.document().document_id(), Some(id));
@@ -1000,7 +1006,7 @@ mod tests {
         old[16 + length..20 + length].copy_from_slice(&c.to_le_bytes());
         fs::write(&path, old).unwrap();
         let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
-        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ3");
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ4");
         assert!(a.request(&edit).unwrap().replayed);
         let close = ProtocolRequest {
             sequence: 2,
@@ -1016,5 +1022,298 @@ mod tests {
             d.session_status(session),
             Some(threex_core::SessionStatus::Closed { sequence: 2 })
         );
+    }
+    fn rejection(result: Result<ProtocolReceipt, StorageError>) -> ProtocolFailure {
+        let Err(StorageError::Rejected(failure)) = result else {
+            panic!("expected durable failure: {result:?}")
+        };
+        failure
+    }
+    #[test]
+    fn errors_survive_state_changes_restart_close_and_result_eviction() {
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let session = new_session_id().unwrap();
+        let bad = ProtocolRequest {
+            protocol_version: 1,
+            document_id: a.document().document_id().unwrap(),
+            session_id: session,
+            sequence: 1,
+            action: ProtocolAction::Undo {
+                expected_revision: 0,
+            },
+        };
+        let first = rejection(a.request(&bad));
+        assert_eq!(
+            first,
+            ProtocolFailure {
+                error: threex_core::DocumentError::NothingToUndo,
+                revision: 0,
+                replayed: false
+            }
+        );
+        assert_eq!(a.document().revision(), 0);
+        a.commit(0, &command(1)).unwrap();
+        let replay = rejection(a.request_with(&bad, |_| panic!("replay wrote journal")));
+        assert_eq!(replay.error, first.error);
+        assert_eq!(replay.revision, 0);
+        assert!(replay.replayed);
+        assert_eq!(a.document().scene().len(), 1);
+        a.save().unwrap();
+        drop(a);
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert_eq!(rejection(a.request(&bad)), replay);
+        let changed = ProtocolRequest {
+            action: ProtocolAction::Commit {
+                expected_revision: 1,
+                commands: command(2),
+            },
+            ..bad.clone()
+        };
+        assert!(matches!(
+            a.request(&changed),
+            Err(StorageError::Request(RequestError::Mismatch))
+        ));
+        let good = ProtocolRequest {
+            sequence: 2,
+            action: ProtocolAction::Undo {
+                expected_revision: 1,
+            },
+            ..bad.clone()
+        };
+        a.request(&good).unwrap();
+        assert!(a.document().scene().is_empty());
+        let close = ProtocolRequest {
+            sequence: 3,
+            action: ProtocolAction::EndSession {
+                expected_revision: 2,
+            },
+            ..bad.clone()
+        };
+        a.request(&close).unwrap();
+        assert_eq!(rejection(a.request(&bad)), replay);
+        let other = new_session_id().unwrap();
+        for start in [1, 33, 65] {
+            let requests = (start..=(start + 31).min(70))
+                .map(|n| envelope(a.document(), other, n, 2, vec![]))
+                .collect::<Vec<_>>();
+            a.request_group(&requests.iter().collect::<Vec<_>>())
+                .unwrap();
+        }
+        a.save().unwrap();
+        drop(a);
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert!(matches!(
+            a.request(&bad),
+            Err(StorageError::Request(RequestError::Expired))
+        ));
+        assert!(a.document().scene().is_empty());
+    }
+    #[test]
+    fn malformed_commands_are_durable_but_admission_failures_do_not_consume_sequence() {
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let session = new_session_id().unwrap();
+        let bad = envelope(a.document(), session, 1, 0, vec![1, 2, 3]);
+        let original = rejection(a.request(&bad));
+        assert!(matches!(
+            original.error,
+            threex_core::DocumentError::InvalidCommand(_)
+        ));
+        a.save().unwrap();
+        drop(a);
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let replay = rejection(a.request(&bad));
+        assert_eq!(replay.error, original.error);
+        assert_eq!(replay.revision, original.revision);
+        assert!(replay.replayed);
+        let other = new_session_id().unwrap();
+        let gap = envelope(a.document(), other, 2, 0, vec![]);
+        let before = fs::read(t.0.join("autosave.txj")).unwrap();
+        assert!(matches!(
+            a.request(&gap),
+            Err(StorageError::Request(RequestError::SequenceGap))
+        ));
+        let oversized = envelope(a.document(), other, 1, 0, vec![0; 256 * 1024 + 1]);
+        assert!(matches!(
+            a.request(&oversized),
+            Err(StorageError::Request(RequestError::Edit(
+                threex_core::DocumentError::CommandTooLarge
+            )))
+        ));
+        assert_eq!(a.document().session_sequence(other), None);
+        assert_eq!(fs::read(t.0.join("autosave.txj")).unwrap(), before);
+    }
+    #[test]
+    fn durable_error_worker_reply_keeps_original_revision_after_restart() {
+        let t = Temp::new();
+        let worker =
+            JournalWorker::start(DocumentStore::new(&t.0), WorkerConfig::default()).unwrap();
+        let bad = ProtocolRequest {
+            protocol_version: 1,
+            document_id: worker.initial_state.document_id,
+            session_id: new_session_id().unwrap(),
+            sequence: 1,
+            action: ProtocolAction::Undo {
+                expected_revision: 0,
+            },
+        };
+        let send = |w: &JournalWorker, id, action| {
+            w.client()
+                .try_submit(WorkerRequest { id, action })
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+        };
+        let first = send(&worker, 1, WorkerAction::Protocol(bad.clone()))
+            .result
+            .unwrap_err();
+        assert_eq!(first.code, WorkerCode::NoHistory);
+        assert_eq!(first.current_revision, 0);
+        send(
+            &worker,
+            2,
+            WorkerAction::Commit {
+                expected_revision: 0,
+                commands: command(1),
+            },
+        )
+        .result
+        .unwrap();
+        assert_eq!(
+            send(&worker, 3, WorkerAction::Protocol(bad.clone()))
+                .result
+                .unwrap_err(),
+            first
+        );
+        send(&worker, 4, WorkerAction::Save).result.unwrap();
+        worker.shutdown().unwrap();
+        let worker =
+            JournalWorker::start(DocumentStore::new(&t.0), WorkerConfig::default()).unwrap();
+        assert_eq!(
+            send(&worker, 1, WorkerAction::Protocol(bad.clone()))
+                .result
+                .unwrap_err(),
+            first
+        );
+        let good = ProtocolRequest {
+            sequence: 2,
+            action: ProtocolAction::Commit {
+                expected_revision: 1,
+                commands: command(2),
+            },
+            ..bad.clone()
+        };
+        send(&worker, 2, WorkerAction::Protocol(good))
+            .result
+            .unwrap();
+        assert_eq!(
+            send(&worker, 3, WorkerAction::Protocol(bad))
+                .result
+                .unwrap_err(),
+            first
+        );
+        worker.shutdown().unwrap();
+        assert_eq!(
+            DocumentStore::new(&t.0)
+                .load()
+                .unwrap()
+                .document
+                .scene()
+                .len(),
+            2
+        );
+    }
+    #[test]
+    fn rejection_record_all_cuts_and_corruptions_recover_last_outcome_boundary() {
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let path = t.0.join("autosave.txj");
+        let base = fs::metadata(&path).unwrap().len() as usize;
+        let bad = ProtocolRequest {
+            protocol_version: 1,
+            document_id: a.document().document_id().unwrap(),
+            session_id: new_session_id().unwrap(),
+            sequence: 1,
+            action: ProtocolAction::Undo {
+                expected_revision: 0,
+            },
+        };
+        let expected = rejection(a.request(&bad));
+        drop(a);
+        let full = fs::read(&path).unwrap();
+        for end in base..=full.len() {
+            fs::write(&path, &full[..end]).unwrap();
+            let d = DocumentStore::new(&t.0).load().unwrap().document;
+            assert_eq!(
+                d.session_sequence(bad.session_id),
+                if end == full.len() { Some(1) } else { None }
+            );
+            assert_eq!(d.revision(), 0);
+        }
+        for at in base..full.len() {
+            let mut damaged = full.clone();
+            damaged[at] ^= 1;
+            fs::write(&path, damaged).unwrap();
+            assert_eq!(
+                DocumentStore::new(&t.0)
+                    .load()
+                    .unwrap()
+                    .document
+                    .session_sequence(bad.session_id),
+                None
+            );
+        }
+        fs::write(&path, full).unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let replay = rejection(a.request(&bad));
+        assert_eq!(replay.error, expected.error);
+        assert!(replay.replayed);
+    }
+    #[test]
+    fn process_exit_during_rejection_preserves_exact_result_and_retry_safety() {
+        if let Ok(path) = std::env::var("THREEX_ERROR_EXIT") {
+            let stage = std::env::var("THREEX_ERROR_STAGE")
+                .unwrap()
+                .parse::<u8>()
+                .unwrap();
+            let mut a = AutosaveDocument::open(DocumentStore::new(path)).unwrap();
+            let bad = ProtocolRequest {
+                protocol_version: 1,
+                document_id: a.document().document_id().unwrap(),
+                session_id: SessionId::from_bytes([111; 16]).unwrap(),
+                sequence: 1,
+                action: ProtocolAction::Undo {
+                    expected_revision: 0,
+                },
+            };
+            let _ = a.request_with(&bad, |at| {
+                if at == stage {
+                    std::process::exit(83)
+                }
+                Ok(())
+            });
+            panic!("missed exit");
+        }
+        for stage in 0..3 {
+            let t = Temp::new();
+            let status=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","protocol::tests::process_exit_during_rejection_preserves_exact_result_and_retry_safety"]).env("THREEX_ERROR_EXIT",&t.0).env("THREEX_ERROR_STAGE",stage.to_string()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
+            assert_eq!(status.code(), Some(83));
+            let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+            let bad = ProtocolRequest {
+                protocol_version: 1,
+                document_id: a.document().document_id().unwrap(),
+                session_id: SessionId::from_bytes([111; 16]).unwrap(),
+                sequence: 1,
+                action: ProtocolAction::Undo {
+                    expected_revision: 0,
+                },
+            };
+            let result = rejection(a.request(&bad));
+            assert_eq!(result.replayed, stage != 0);
+            assert_eq!(result.error, threex_core::DocumentError::NothingToUndo);
+            assert_eq!(a.document().revision(), 0);
+            assert_eq!(a.document().session_sequence(bad.session_id), Some(1));
+        }
     }
 }

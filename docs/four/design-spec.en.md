@@ -38,3 +38,11 @@ Bare Commit worker candidates also retain validated deltas and journal prepared 
 Semantic content hash v1 is implemented for Document/snapshots, captured save receipts and explicit worker queries. Revision/request guards remain unchanged. [Specification](content-hash.md).
 
 Session lifecycle now persists closure/tombstones in checkpoint/journal v3, reclaims active slots, migrates v1/v2 and prevents stale requests from reapplying after close/restart. [Specification](session-lifecycle.md).
+
+Admitted editing errors are durable v4 outcomes; retries preserve the original error/revision and corrected requests use the next sequence. [Admission and recovery contract](durable-errors.md).
+
+2026-10-15：🟢 [Done] Tauri async IPC, caller authorization and localized error DTOs are implemented. Real invoke tests preserve Rust worker ownership and durable replay after restart. Actual Wry and renderer integration remain pending. [IPC](tauri-ipc.md)。
+
+2026-10-15：🟢 [Done] Rust renderer and native surface lifecycle are implemented with worker-owned Scene borrowing, generation-checked replacement, suspension, teardown and bounded retries. Document ownership and restart deduplication are preserved; real OS/GPU presentation is pending. [Native Renderer](native-renderer.md)。
+
+2026-10-15：🟢 [Done] Native window callback wiring and an on-demand redraw scheduler are implemented. Durable Scene publication wakes rendering; event coalescing, retained backpressure, bounded retries, suspension, shutdown and restart replay are tested. Actual OS event delivery and GPU presentation remain pending. [Redraw](native-redraw.md)。

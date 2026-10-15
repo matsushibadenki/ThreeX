@@ -1,3 +1,5 @@
+> Protocolの受理済みエラーは同期後に返し、再送時のWorkerFailure.current_revisionは失敗当時の観測値。[最新仕様](durable-errors.md)。
+
 > EndSessionは併合境界。InspectSessionはActive／Closedと最終連番を返す。[最新lifecycle／v3仕様](session-lifecycle.md)。
 
 > 2026-10-15：ProtocolRequestの候補prefix準備を差分化し、journalへ準備結果を直接渡す。[最新の性能・検証](worker-prefix-performance.md)。裸Commit候補も[差分化済み](bare-prefix-performance.md)。
@@ -97,13 +99,14 @@ node --test tests/compat/scene.test.js
 ```
 
 - 🟢 [Done] Rust worker、bounded queue、時間／件数batching、session内request重複排除・既定3言語error。
-- 🟠 [Next] Tauri async command／Renderer接続。
+- 🟢 [Done] Tauri async command／Rust Renderer接続・native surface lifecycle（[仕様](native-renderer.md)）。
 - ⭕️ [Pending] native surface／実UI、実電源断・他OS durability。
 
 English: A native Rust worker owns the document and journal; window clients submit
 bounded requests and receive small results. Adjacent compatible edits group behind
-one sync. Request results are cached only within the live session; expired IDs are
-rejected, and restart requires resynchronization. Tauri and renderer wiring remain future work.
+one sync. Request results are cached only within the live session; expired transport IDs are
+rejected. Durable ProtocolRequest receipts survive restart. Tauri async and native renderer wiring
+are implemented; actual OS/GPU presentation remains pending.
 
 简体中文：原生 Rust worker 拥有文档与日志，窗口客户端提交有界请求并接收小型结果。
 兼容的相邻编辑在一次同步后发布。请求结果仅在当前会话缓存，过期 ID 被拒绝，
@@ -111,3 +114,9 @@ rejected, and restart requires resynchronization. Tauri and renderer wiring rema
 
 裸Commitも`CommitGroupBuilder`の受理済み差分を直接journalへ渡す。
 [2026-10-15のCPU／実worker性能と復旧検証](bare-prefix-performance.md)。
+
+🟢 [Done] Tauri asyncホスト・IPC認可・3言語エラーDTOと再起動再送検証：[Tauri IPC](tauri-ipc.md)。実Wry／OS別表示検証は⭕️ [Pending]。
+
+🟢 [Done] Rust Renderer／native surface接続・世代付きlifecycleとworker Scene借用：[仕様・検証](native-renderer.md)。実OS／GPU表示は⭕️ [Pending]。
+
+🟢 [Done] native Windowイベント自動配線とon-demand redraw scheduler：[仕様・検証](native-redraw.md)。実OS／GPUイベント・表示は⭕️ [Pending]。

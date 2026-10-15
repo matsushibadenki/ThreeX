@@ -143,3 +143,11 @@ recovery and durable restart deduplication. [Benchmarks and limits](docs/four/pr
 - 🟢 [Done] 意味内容hash v1・保存receipt／worker query・復旧検証：[docs/four/content-hash.md](docs/four/content-hash.md)。
 
 - 🟢 [Done] session終了・Active枠再利用・v3永続化と移行・終了後／restart後の再送抑止：[docs/four/session-lifecycle.md](docs/four/session-lifecycle.md)。
+
+- 🟢 [Done] 受理済み編集エラーの永続化・元結果の再送・v4移行／重複排除検証：[docs/four/durable-errors.md](docs/four/durable-errors.md)。
+
+🟢 [Done] Tauri asyncホスト・IPC認可・3言語エラーDTOと再起動再送検証：[Tauri IPC](docs/four/tauri-ipc.md)。実Wry／OS別表示検証は⭕️ [Pending]。
+
+🟢 [Done] Rust Renderer／native surface接続・世代付きlifecycleとworker Scene借用：[仕様・検証](docs/four/native-renderer.md)。実OS／GPU表示は⭕️ [Pending]。
+
+🟢 [Done] native Windowイベント自動配線とon-demand redraw scheduler：[仕様・検証](docs/four/native-redraw.md)。実OS／GPUイベント・表示は⭕️ [Pending]。

@@ -1,7 +1,7 @@
 //! Write-ahead transaction log with an immutable, self-contained checkpoint anchor.
 use super::*;
 use std::io::{Seek, SeekFrom};
-const MAGIC: &[u8; 8] = b"THREEXJ3";
+const MAGIC: &[u8; 8] = b"THREEXJ4";
 const MAX_LOG: u64 = 256 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024 + 21;
 fn crc(b: &[u8]) -> u32 {
@@ -70,7 +70,7 @@ impl AutosaveDocument {
         File::open(store.root.join("autosave.txj"))?
             .take(8)
             .read_to_end(&mut header)?;
-        let legacy = header == b"THREEXJ1" || header == b"THREEXJ2";
+        let legacy = header == b"THREEXJ1" || header == b"THREEXJ2" || header == b"THREEXJ3";
         // Only a writer repairs the invalid suffix. Read-only recovery never modifies files.
         if valid_bytes == 0 {
             fs::copy(
@@ -244,9 +244,9 @@ impl AutosaveDocument {
             return Err(StorageError::UnsupportedRequestProtocol);
         }
         let (kind, expected, commands) = request.action.parts();
-        let prepared = match self
+        if let Some(result) = self
             .document
-            .prepare_request(
+            .replay_rejection(
                 request.document_id,
                 request.session_id,
                 request.sequence,
@@ -256,13 +256,31 @@ impl AutosaveDocument {
             )
             .map_err(StorageError::Request)?
         {
-            threex_core::RequestPreparation::Replay(revision) => {
+            return Err(StorageError::Rejected(ProtocolFailure {
+                error: result.error,
+                revision: result.revision,
+                replayed: true,
+            }));
+        }
+        let prepared = match self.document.prepare_request(
+            request.document_id,
+            request.session_id,
+            request.sequence,
+            kind,
+            expected,
+            commands,
+        ) {
+            Err(threex_core::RequestError::Edit(_)) => {
+                return self.request_rejection_with(request, hook);
+            }
+            Err(error) => return Err(StorageError::Request(error)),
+            Ok(threex_core::RequestPreparation::Replay(revision)) => {
                 return Ok(ProtocolReceipt {
                     revision,
                     replayed: true,
                 });
             }
-            threex_core::RequestPreparation::Pending(prepared) => prepared,
+            Ok(threex_core::RequestPreparation::Pending(prepared)) => prepared,
         };
         let revision = prepared.revision();
         let mut payload = vec![4];
@@ -296,6 +314,64 @@ impl AutosaveDocument {
             revision,
             replayed: false,
         })
+    }
+    pub(super) fn request_rejection_with(
+        &mut self,
+        request: &ProtocolRequest,
+        mut hook: impl FnMut(u8) -> std::io::Result<()>,
+    ) -> Result<ProtocolReceipt, StorageError> {
+        let (kind, expected, commands) = request.action.parts();
+        let prepared = self
+            .document
+            .prepare_rejection(
+                request.document_id,
+                request.session_id,
+                request.sequence,
+                kind,
+                expected,
+                commands,
+            )
+            .map_err(StorageError::Request)?;
+        let result = prepared.result();
+        let error = threex_core::encode_request_error(&result.error).unwrap();
+        let mut payload = vec![5];
+        payload.extend(expected.to_le_bytes());
+        payload.extend(result.revision.to_le_bytes());
+        payload.extend(request.document_id.bytes());
+        payload.extend(request.session_id.bytes());
+        payload.extend(request.sequence.to_le_bytes());
+        payload.push(kind);
+        payload.extend((error.len() as u32).to_le_bytes());
+        payload.extend(error);
+        payload.extend(commands);
+        let bytes = frame(&payload);
+        if !self.append_ready {
+            return Err(StorageError::JournalCorrupt);
+        }
+        if payload.len() > MAX_RECORD + 2048 || self.valid_bytes + bytes.len() as u64 > MAX_LOG {
+            return Err(StorageError::JournalLimit);
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(self.store.root.join("autosave.txj"))?;
+        file.set_len(self.valid_bytes)?;
+        file.seek(SeekFrom::Start(self.valid_bytes))?;
+        file.write_all(&bytes[..bytes.len() / 2])?;
+        hook(0)?;
+        file.write_all(&bytes[bytes.len() / 2..])?;
+        hook(1)?;
+        file.sync_all()?;
+        hook(2)?;
+        self.valid_bytes += bytes.len() as u64;
+        let result = self
+            .document
+            .apply_rejection(prepared)
+            .map_err(StorageError::Request)?;
+        Err(StorageError::Rejected(ProtocolFailure {
+            error: result.error,
+            revision: result.revision,
+            replayed: false,
+        }))
     }
     pub(super) fn request_group_with(
         &mut self,
@@ -445,14 +521,16 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
     }
     let legacy = bytes.get(..8) == Some(b"THREEXJ1".as_slice());
     let v2 = bytes.get(..8) == Some(b"THREEXJ2".as_slice());
+    let v3 = bytes.get(..8) == Some(b"THREEXJ3".as_slice());
     if bytes.get(..7) == Some(&MAGIC[..7])
         && bytes.get(..8) != Some(MAGIC.as_slice())
         && !legacy
         && !v2
+        && !v3
     {
         return Err(StorageError::UnsupportedJournalVersion);
     }
-    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 {
+    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 && !v3 {
         return fallback(store, bytes.len() as u64);
     }
     let Some((base, mut at)) = decode(&bytes, 8, MAX_BYTES as usize) else {
@@ -472,9 +550,53 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
     }
     let mut transactions = 0;
     while at < bytes.len() {
-        let Some((payload, end)) = decode(&bytes, at, MAX_RECORD + 64) else {
+        let Some((payload, end)) = decode(&bytes, at, MAX_RECORD + 2048) else {
             break;
         };
+        if payload.first() == Some(&5) && !legacy && !v2 && !v3 {
+            if payload.len() < 63 {
+                break;
+            }
+            let expected = u64::from_le_bytes(payload[1..9].try_into().unwrap());
+            let revision = u64::from_le_bytes(payload[9..17].try_into().unwrap());
+            let Some(id) = threex_core::DocumentId::from_bytes(payload[17..33].try_into().unwrap())
+            else {
+                break;
+            };
+            let Some(session) =
+                threex_core::SessionId::from_bytes(payload[33..49].try_into().unwrap())
+            else {
+                break;
+            };
+            let sequence = u64::from_le_bytes(payload[49..57].try_into().unwrap());
+            let kind = payload[57];
+            let length = u32::from_le_bytes(payload[58..62].try_into().unwrap()) as usize;
+            if length == 0 || length > 1025 || length > payload.len() - 62 {
+                break;
+            }
+            let Some(error) = threex_core::decode_request_error(&payload[62..62 + length]) else {
+                break;
+            };
+            let Ok(prepared) =
+                document.prepare_recorded_rejection(threex_core::RecordedRejection {
+                    document: id,
+                    session,
+                    sequence,
+                    kind,
+                    expected,
+                    commands: &payload[62 + length..],
+                    result: threex_core::RequestRejection { error, revision },
+                })
+            else {
+                break;
+            };
+            if document.apply_rejection(prepared).is_err() {
+                break;
+            }
+            transactions += 1;
+            at = end;
+            continue;
+        }
         if payload.first() == Some(&4) && !legacy {
             if payload.len() < 58 {
                 break;
@@ -1028,7 +1150,7 @@ mod tests {
         );
         assert!(t.0.join("autosave.damaged").exists());
         let mut b = fs::read(&path).unwrap();
-        b[7] = b'4';
+        b[7] = b'5';
         fs::write(&path, b).unwrap();
         assert!(matches!(
             DocumentStore::new(&t.0).load(),
@@ -1218,6 +1340,89 @@ mod tests {
             assert!(a.request(&close).unwrap().replayed);
             assert_eq!(a.document().scene().len(), 2);
         }
+    }
+    #[test]
+    fn rejected_outcomes_survive_failed_sync_compaction_and_saved_metadata_fallback() {
+        for stage in 0..3 {
+            let t = Temp::new();
+            let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+            let bad = ProtocolRequest {
+                protocol_version: 1,
+                document_id: a.document().document_id().unwrap(),
+                session_id: threex_core::SessionId::from_bytes([115; 16]).unwrap(),
+                sequence: 1,
+                action: ProtocolAction::Undo {
+                    expected_revision: 0,
+                },
+            };
+            assert!(matches!(
+                a.request_with(&bad, |at| if at == stage {
+                    Err(std::io::Error::other("injected rejection IO failure"))
+                } else {
+                    Ok(())
+                }),
+                Err(StorageError::Io(_))
+            ));
+            assert_eq!(a.document().session_sequence(bad.session_id), None);
+            assert!(matches!(
+                a.request(&bad),
+                Err(StorageError::Rejected(ProtocolFailure {
+                    replayed: false,
+                    ..
+                }))
+            ));
+            assert!(
+                a.save_compact(|at| if at == stage {
+                    Err(std::io::Error::other("injected rejection compact failure"))
+                } else {
+                    Ok(())
+                })
+                .is_err()
+            );
+            add(&mut a, 1);
+            drop(a);
+            let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+            assert!(matches!(
+                a.request(&bad),
+                Err(StorageError::Rejected(ProtocolFailure {
+                    error: threex_core::DocumentError::NothingToUndo,
+                    revision: 0,
+                    replayed: true
+                }))
+            ));
+            assert_eq!(a.document().scene().len(), 1);
+        }
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let base = a.valid_bytes;
+        let bad = ProtocolRequest {
+            protocol_version: 1,
+            document_id: a.document().document_id().unwrap(),
+            session_id: threex_core::SessionId::from_bytes([116; 16]).unwrap(),
+            sequence: 1,
+            action: ProtocolAction::Undo {
+                expected_revision: 0,
+            },
+        };
+        assert!(matches!(a.request(&bad), Err(StorageError::Rejected(_))));
+        a.store
+            .save_locked(PreparedSave::capture(a.document()).unwrap(), |_| Ok(()))
+            .unwrap();
+        drop(a);
+        OpenOptions::new()
+            .write(true)
+            .open(t.0.join("autosave.txj"))
+            .unwrap()
+            .set_len(base)
+            .unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert!(matches!(
+            a.request(&bad),
+            Err(StorageError::Rejected(ProtocolFailure {
+                replayed: true,
+                ..
+            }))
+        ));
     }
 }
 

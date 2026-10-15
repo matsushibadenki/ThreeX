@@ -27,6 +27,7 @@ impl Default for WorkerConfig {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkerAction {
+    Render(threex_renderer::native::SurfaceRequest),
     Commit {
         expected_revision: u64,
         commands: Vec<u8>,
@@ -177,6 +178,11 @@ pub struct WorkerState {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkerOutcome {
+    Rendered {
+        result:
+            Result<threex_renderer::native::FrameStatus, threex_renderer::native::SurfaceFailure>,
+        state: WorkerState,
+    },
     ContentHash {
         hash: threex_core::ContentHash,
         state: WorkerState,
@@ -274,6 +280,17 @@ pub struct JournalWorker {
 }
 impl JournalWorker {
     pub fn start(store: DocumentStore, config: WorkerConfig) -> Result<Self, WorkerStartError> {
+        Self::start_with_surfaces(
+            store,
+            config,
+            threex_renderer::native::NativeSurfaces::default(),
+        )
+    }
+    pub fn start_with_surfaces(
+        store: DocumentStore,
+        config: WorkerConfig,
+        surfaces: threex_renderer::native::NativeSurfaces,
+    ) -> Result<Self, WorkerStartError> {
         if !(1..=64).contains(&config.queue_capacity)
             || !(1..=32).contains(&config.batch_size)
             || !(1..=256).contains(&config.result_capacity)
@@ -302,7 +319,10 @@ impl JournalWorker {
                         return;
                     }
                 };
+                let render_stamp = Some(owner.document().scene().stamp());
                 let mut service = Service {
+                    render_stamp,
+                    surfaces,
                     owner,
                     saved,
                     sync_groups: 0,
@@ -349,6 +369,8 @@ impl Drop for JournalWorker {
 }
 type ResultValue = Result<WorkerOutcome, WorkerFailure>;
 struct Service {
+    render_stamp: Option<threex_core::SceneStamp>,
+    surfaces: threex_renderer::native::NativeSurfaces,
     owner: AutosaveDocument,
     saved: Option<u64>,
     sync_groups: u64,
@@ -378,6 +400,11 @@ impl Service {
     }
     fn storage_error(&self, error: StorageError) -> WorkerFailure {
         let code = match error {
+            StorageError::Rejected(failure) => {
+                let mut result = self.storage_error(StorageError::Edit(failure.error));
+                result.current_revision = failure.revision;
+                return result;
+            }
             StorageError::Request(threex_core::RequestError::SessionClosed) => {
                 WorkerCode::SessionClosed
             }
@@ -418,6 +445,15 @@ impl Service {
         self.failure(code)
     }
     fn finish(&mut self, message: Message, result: ResultValue) {
+        if !self
+            .owner
+            .document()
+            .scene()
+            .is_current(self.render_stamp.as_ref())
+        {
+            self.render_stamp = Some(self.owner.document().scene().stamp());
+            self.surfaces.scene_changed();
+        }
         self.highest = self.highest.max(message.request.id);
         self.order.push_back(message.request.id);
         self.cache
@@ -481,22 +517,30 @@ impl Service {
                     continue;
                 }
                 let result = match &message.request.action {
+                    WorkerAction::Render(request) => Ok(WorkerOutcome::Rendered {
+                        result: self
+                            .surfaces
+                            .execute(self.owner.document().scene(), request),
+                        state: self.state(),
+                    }),
                     WorkerAction::InspectSession { session_id } => Ok(WorkerOutcome::Session {
                         session_id: *session_id,
                         sequence: self.owner.document().session_sequence(*session_id),
                         status: self.owner.document().session_status(*session_id),
                         state: self.state(),
                     }),
-                    WorkerAction::Protocol(request) => self.owner.request(request).map(|receipt| {
-                        if !receipt.replayed {
-                            self.sync_groups += 1
+                    WorkerAction::Protocol(request) => {
+                        let generation = self.owner.document().request_generation();
+                        let result = self.owner.request(request);
+                        if self.owner.document().request_generation() != generation {
+                            self.sync_groups += 1;
                         }
-                        WorkerOutcome::Protocol {
+                        result.map(|receipt| WorkerOutcome::Protocol {
                             revision: receipt.revision,
                             replayed: receipt.replayed,
                             state: self.state(),
-                        }
-                    }),
+                        })
+                    }
                     WorkerAction::Undo { expected_revision } => {
                         self.owner.undo(*expected_revision).map(|revision| {
                             self.sync_groups += 1;
@@ -552,10 +596,21 @@ impl Service {
         let WorkerAction::Protocol(request) = &group[0].request.action else {
             unreachable!()
         };
-        if let Err(error) = crate::protocol::push_protocol_candidate(&mut builder, request) {
+        if crate::protocol::push_protocol_candidate(&mut builder, request).is_err() {
             drop(builder);
-            let failure = self.storage_error(error);
-            self.finish(group.pop().unwrap(), Err(failure));
+            let generation = self.owner.document().request_generation();
+            let result = self.owner.request(request);
+            if self.owner.document().request_generation() != generation {
+                self.sync_groups += 1;
+            }
+            let result = result
+                .map(|receipt| WorkerOutcome::Protocol {
+                    revision: receipt.revision,
+                    replayed: receipt.replayed,
+                    state: self.state(),
+                })
+                .map_err(|error| self.storage_error(error));
+            self.finish(group.pop().unwrap(), result);
             return;
         }
         while let Some(next) = chunk.front() {
@@ -1101,7 +1156,7 @@ mod tests {
         worker.shutdown().unwrap();
     }
     #[test]
-    fn protocol_invalid_neighbor_does_not_reject_valid_prefix_or_consume_sequence() {
+    fn protocol_invalid_neighbor_preserves_valid_prefix_and_consumes_durable_error_sequence() {
         let t = Temp::new();
         let worker = JournalWorker::start(DocumentStore::new(&t.0), config()).unwrap();
         let session = crate::new_session_id().unwrap();
@@ -1124,6 +1179,7 @@ mod tests {
             ..first.clone()
         };
         let good = crate::ProtocolRequest {
+            sequence: 3,
             action: crate::ProtocolAction::Commit {
                 expected_revision: 1,
                 commands: command(2),
@@ -1156,10 +1212,10 @@ mod tests {
             panic!()
         };
         assert_eq!(revision, 2);
-        assert_eq!(state.successful_sync_groups, 2);
+        assert_eq!(state.successful_sync_groups, 3);
         worker.shutdown().unwrap();
         let d = DocumentStore::new(&t.0).load().unwrap().document;
-        assert_eq!(d.session_sequence(session), Some(2));
+        assert_eq!(d.session_sequence(session), Some(3));
         assert_eq!(d.scene().len(), 2);
     }
     #[test]

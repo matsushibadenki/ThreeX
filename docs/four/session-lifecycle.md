@@ -1,3 +1,5 @@
+> 現行はv4。受理済みの失敗も連番を消費する。[エラー結果の最新仕様](durable-errors.md)。以下にv3導入時のencodingも記録する。
+
 # 永続session lifecycle
 
 2026-10-15 JST。native request/session protocolへ`EndSession`を追加し、session終了を永続化した。
@@ -6,7 +8,7 @@ DocumentはRustが所有し、終了も単一workerの順序に従う。window�
 
 ## 状態とAPI
 
-sessionは未使用→Active→Closedの一方向。最初の成功したCommit／Undo／RedoでActiveになる。
+sessionは未使用→Active→Closedの一方向。最初に永続化された編集結果（成功または確定エラー）でActiveになる。
 明示的なopen要求は不要。未知sessionの終了はSessionUnknownで拒否し、記録を作らない。
 終了済みIDは再使用・再開しない。新しい接続は新SessionIdを生成する。
 
@@ -41,7 +43,7 @@ SessionClosed／SessionUnknownは安定error codeと英語・日本語・简体�
 
 終了要求自身の応答が失われたら、元のdocument/session/sequence/expected revisionをそのまま再送する。
 保持中なら元のreceiptを返し、再同期しない。結果が期限切れならInspectSessionでClosedを確認する。
-失敗した終了要求は連番や状態を消費しない。古いprepared request／groupはwatermark／metadata世代で拒否する。
+終了要求の受理済み編集エラーは連番を消費するがClosedにはしない。受理前の拒否／IO失敗は消費しない。古いprepared request／groupはwatermark／metadata世代で拒否する。
 候補builderも終了済みsessionからの新規編集を拒否し、受理済みprefixを変更しない。
 
 同時Activeは64、Active＋Closedの記録数はDocument lifetimeで4096。
@@ -92,7 +94,7 @@ npm test
 
 - 🟢 [Done] sessionの明示終了・Active枠再利用・有界終了記録、v3永続化／旧形式移行。
 - 🟢 [Done] 終了後・再起動後・receipt淘汰後の再送抑止と障害prefix復旧。
-- 🟠 [Next] 永続エラー結果、Tauri async／IPC認可・Renderer接続。
+- 🟢 [Done] Tauri async／IPC認可・Rust Renderer接続（[仕様](native-renderer.md)）。
 - 🔴 [Later] Document forkと明示的な運用archive方針。
 - ⭕️ [Pending] 実電源断・容量不足・他OS durability、実UIとの切断／終了連携。
 

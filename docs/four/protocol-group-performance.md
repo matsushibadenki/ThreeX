@@ -86,7 +86,7 @@ npm test
 
 - 🟢 [Done] ProtocolRequest Commit group、worker自動batch、正常prefix復旧・再起動後の重複排除。
 - 🟢 [Done] fsync呼出し検証、before／after 2組の実測・ソース保存。
-- 🟠 [Next] 永続エラー結果、Tauri async／認可接続。
+- 🟢 [Done] Tauri async／認可接続（[仕様](tauri-ipc.md)）。
 - ⭕️ [Pending] 実電源断、容量不足、Windows／Linux durability、Tauri実UIでの再送。
 
 English: Protocol Commit requests share one journal sync while retaining individual edit/receipt,

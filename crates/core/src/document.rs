@@ -3,7 +3,7 @@ use crate::{Object, Scene};
 use std::collections::BTreeMap;
 
 /// Typed failures for hosts to translate into localized messages.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DocumentError {
     RevisionConflict { current: u64 },
     CommandTooLarge,

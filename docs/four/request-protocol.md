@@ -1,3 +1,5 @@
+> 現行はcheckpoint／journal v4。受理済み編集エラーも永続化して連番を消費する。[最新のエラー結果仕様](durable-errors.md)。
+
 > 2026-10-15：現行保存形式はcheckpoint／journal v3。EndSession・終了記録とActive枠再利用を実装。[最新のsession lifecycle](session-lifecycle.md)。以下のv2記述は導入時の形式も含む。
 
 # 永続Document IDとrequest/session protocol
@@ -41,7 +43,7 @@ ProtocolReceipt { revision, replayed }
 `new_session_id()`でsessionを作り、クライアントは未応答requestと一緒にIDを保持する。
 再送には元のdocument_id・session_id・sequence・actionをそのまま使う。
 連番は各sessionで1から開始し、成功時に増やす。欠落連番、0、別Document、未対応protocolは拒否。
-validationで拒否されたrequestは連番を消費せず、拒否結果自体は永続化しない。
+受理済みの編集エラーは連番を消費して結果を永続化する。受理前の拒否／IO失敗は対象外。訂正要求には次の連番を使う。
 no-op成功はrevisionを増やさないが、連番とreceiptを永続化する。
 
 worker起動時の`initial_state.document_id`で対象を確認し、`InspectSession { session_id }`で
@@ -84,8 +86,8 @@ no-opのためDocument revisionが同じ場合でもrequest metadata世代を比
 
 ## 実装範囲と保証
 
-成功したCommit／Undo／Redo（no-op含む）の永続receiptを実装。Save／read／validationエラーの
-永続結果cacheは未実装。認証・認可としてsession IDを使うものではなく、CRC32も改ざん防止ではない。
+成功したCommit／Undo／Redo（no-op含む）の永続receiptを実装。Save／read／受理前の拒否の
+永続結果cacheは対象外。認証・認可としてsession IDを使うものではなく、CRC32も改ざん防止ではない。
 Protocol Commitは`request_group(&[&request, ...])`とworker自動batchに対応し、最大32件／1 MiBを1回syncする。
 各requestのreceipt／Undo境界を維持し、バッチ内再送も重複追加しない。Undo／Redoは単独requestの境界。
 [同期回数・性能・prefix復旧](protocol-group-performance.md)に、この経路の実測と制約を記載。
@@ -102,7 +104,7 @@ payload不一致・別文書・未知protocol拒否、no-op、receipt eviction�
 worker再起動とsession handshake、record全切断位置とprocess exit、no-op保存中断からのreceipt復旧。
 子プロセスをpartial write／full write／sync直後でexitし、再送が編集を二重に適用しないことを確認。
 
-最新のgroup検証を含めcore43件＋storage52件＋WGSL1件＋JS4件が成功。core／storageはdebugとreleaseで確認。
+最新のgroup検証を含めcore48件＋storage58件＋WGSL1件＋JS4件が成功。core／storageはdebugとreleaseで確認。
 
 ```sh
 cargo test --offline --workspace
@@ -116,7 +118,7 @@ cargo run --offline --release -p threex-storage --example request_demo -- /tmp/n
 
 - 🟢 [Done] 永続Document ID、checkpoint/journal v2移行、request/session v1、再起動後の重複排除。
 - 🟢 [Done] Protocol Commit group、worker自動batch、正常prefix復旧・fsync／性能比較。
-- 🟠 [Next] 永続エラー結果、Tauri IPC認可／async接続。
+- 🟢 [Done] Tauri IPC認可／async接続（[仕様](tauri-ipc.md)）。
 - ⭕️ [Pending] 実電源断・他OS・実UIの再送復旧。
 
 English: Document identity, session watermarks and recent successful request receipts
@@ -130,3 +132,5 @@ rejected using retained watermarks. Protocol Commit grouping and worker batching
 
 workerの候補prefixは差分準備され、受理済みopaque planを直接journalへ渡す。
 [2026-10-15の候補CPU・実worker比較と追加検証](worker-prefix-performance.md)。
+
+🟢 [Done] Tauri asyncホスト・IPC認可・3言語エラーDTOと再起動再送検証：[Tauri IPC](tauri-ipc.md)。実Wry／OS別表示検証は⭕️ [Pending]。

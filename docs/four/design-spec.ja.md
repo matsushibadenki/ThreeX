@@ -40,3 +40,11 @@ workerのProtocolRequest候補は受理済み差分を保持して追加候補�
 意味内容hash v1を実装。Document／snapshot・保存receipt・worker明示queryに対応し、既存のrevision／request guardを維持。[仕様と検証](content-hash.md)。
 
 session lifecycleを実装。明示終了・Active枠再利用と有界終了記録をcheckpoint／journal v3へ永続化し、旧v1／v2移行と終了後／restart後の再送抑止を検証。[仕様](session-lifecycle.md)。
+
+受理済み編集エラーを永続化。失敗も連番を消費し、再送で当時の結果を返す。checkpoint／journal v4と旧形式移行・障害復旧を検証。[仕様](durable-errors.md)。
+
+2026-10-15：🟢 [Done] Tauri async接続・IPC認可・3言語エラーDTOを実装。Rust worker所有を維持し、再起動後の再送と永続エラーを実invokeで検証。実Wry／RendererはPending。 [IPC](tauri-ipc.md)。
+
+2026-10-15：🟢 [Done] Rust Rendererとnative surface lifecycleを実装。worker内のScene借用、世代付き交換・休止・破棄と有界再試行により、Document単一所有とrestart再送抑止を維持。実OS／GPU表示はPending。 [Native Renderer](native-renderer.md)。
+
+2026-10-15：🟢 [Done] native Window callback自動配線とon-demand schedulerを実装。workerの公開済みScene変更だけを通知し、イベント集約、queue満杯時の保持、有界再試行、休止・終了とrestart再送を検証。実OSイベント配送・GPU表示はPending。 [Redraw](native-redraw.md)。

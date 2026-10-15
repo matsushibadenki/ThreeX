@@ -13,6 +13,10 @@ pub use request::{
     DocumentId, MAX_SESSION_RECORDS, PreparedRequest, PreparedRequestGroup, RequestCommit,
     RequestError, RequestGroupBuilder, RequestPreparation, SessionId, SessionStatus,
 };
+pub use request::{
+    PreparedRejection, RecordedRejection, RequestRejection, decode_request_error,
+    encode_request_error,
+};
 
 mod instance_updates;
 mod scene;

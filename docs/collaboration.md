@@ -218,3 +218,54 @@ window閉鎖／通信切断を勝手に終了と解釈せず、明示EndSession�
 
 シンボリックリンクへのCargo path・import・include・実行時依存は追加していない。
 [仕様・復旧検証](four/session-lifecycle.md)。
+
+## 永続エラー結果
+
+2026-10-15にUniversal-3DのRust Editor所有、revision／base_revisionとDocumentPatchの差分通知、
+保存snapshot一致判定を再確認。ThreeXはScene revisionと永続request metadataを区別し、失敗は
+Sceneを変更せずRust側で記録する。再送のエラーrevisionは失敗当時の値であり、現在stateは別途照会する。
+相手側protocolとの互換性を仮定せず、相手ソース・保存形式を変更していない。
+
+- 🟢 [Done] 受理済み編集エラー結果・元の結果の再送、v4移行と障害復旧検証。
+- ⭕️ [Pending] 実UI／文書交換・Tauri IPCの統合検証。
+
+シンボリックリンクへのCargo path・import・include・実行時依存は追加していない。
+[仕様・検証](four/durable-errors.md)。
+
+## Tauri async／IPC境界
+
+2026-10-15。Universal-3DのRust Editor所有、revision／base_revisionによるDocumentPatch、
+保存snapshot比較を参照。ThreeXもウインドウから状態所有を分離し、単一Rust workerへ
+小さい命令・状態のみを渡す。相手側のprotocolやwindowラベルを互換契約とはしていない。
+
+- 🟢 [Done] Tauri async IPC、window／origin／session認可、3言語エラーDTO、restart再送検証。
+- ⭕️ [Pending] 実Wry UI／相手アプリとの文書交換・Renderer接続。
+
+相手ソースは参照のみ。シンボリックリンクへの依存は追加していない。
+[仕様と検証](four/tauri-ipc.md)。
+
+## Rust Rendererとnative surface lifecycle
+
+2026-10-15。Universal-3Dのopen_viewportにおけるイベントループ上のWindow／Surface生成と
+Rust Editor／Renderer所有分離を参照した。ThreeXではDocument workerの単一所有を保持し、
+同queueのRender命令でSceneを直接借用する。surfaceの交換とGPU障害を文書編集・永続receiptから分離した。
+相手のコード・保存形式・protocolを変更せず、相手のwindowラベルを互換契約にしていない。
+
+- 🟢 [Done] native backend・世代付き交換／破棄・有界復旧、worker借用とrestart再送検証。
+- ⭕️ [Pending] 実OS／GPU surface表示・両アプリを使うUI／文書交換。
+
+シンボリックリンクへのCargo path／include／import／実行時依存は追加していない。
+[仕様と検証境界](four/native-renderer.md)。
+
+## Nativeイベント配線とon-demand redraw
+
+2026-10-15。Universal-3Dのnative viewport resize時のdrawとDestroyed時のRenderer解放を参照。
+ThreeXではnative callbackを世代付きの小さいintentへ変換し、単一Document workerの永続公開後に
+schedulerへwakeを送る。DocumentやSceneをwindow／schedulerへ複製せず、再送は永続protocolで処理する。
+相手の保存形式・request protocolに互換を仮定せず、相手ソースを変更していない。
+
+- 🟢 [Done] callback自動配線・イベント集約・backpressure保持とon-demand scheduler、restart再送検証。
+- ⭕️ [Pending] 実OS／GPUのイベント配送・表示と両アプリの文書交換。
+
+シンボリックリンクへのCargo path／include／import／実行時依存は追加していない。
+[仕様・検証境界](four/native-redraw.md)。

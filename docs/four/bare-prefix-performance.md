@@ -103,7 +103,7 @@ core35＋storage43＋WGSL1＋JS4＝83件成功。core／storageはdebug・releas
 
 - 🟢 [Done] 裸Commit候補prefix差分準備、prepared group直接journal送信。
 - 🟢 [Done] live-worker再送重複排除／障害復旧、候補CPU・実worker前後2組の測定。
-- 🟠 [Next] 永続エラー結果、Tauri async／Renderer接続。
+- 🟢 [Done] Tauri async／Rust Renderer接続・native surface lifecycle（[仕様](native-renderer.md)）。
 - ⭕️ [Pending] 実電源断・容量不足・他OS durability・実UI／GPU統合検証。
 
 English: Bare Commit candidates now retain validated scene/history deltas and journal their

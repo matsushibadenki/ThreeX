@@ -38,7 +38,8 @@ and limitations are in soa-performance.md. GPU/power measurements remain pending
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust core: 43 passed; storage: 52 passed in debug and release. WGSL validation: 1 passed.
+- Rust core: 48 passed; storage: 58 passed in debug and release. Tauri IPC / native scheduler: 17 passed. Renderer lifecycle: 5 passed; WGSL validation: 1 passed.
+- Current native suite: 129 passed in debug and release; JS: 4 passed.
 - JS compatibility tests: 4 passed.
 - Native GPU test: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.
@@ -62,7 +63,7 @@ Current membership packing measurements and limitations: packing-performance.md;
 - 🟢 [Done] FX-01〜06の日本語・英語・简体中文仕様と実装対応表（four/README.md）。
 - 🟢 [Done] version付きDocument checkpoint、Undo/Redo永続化、世代復旧、障害・プロセス終了テスト（storage 30件）。
 - 🟢 [Done] 意味内容hash v1、snapshot／保存receipt／worker明示query、正規化と保存・復旧検証（four/content-hash.md）。
-- 🟠 [Next] Tauriホスト接続・IPC認可／エラー翻訳。
+- 🟢 [Done] Tauri asyncホスト接続・window/origin/session認可・3言語エラーDTO（four/tauri-ipc.md）。
 - 🔴 [Later] WorkspaceStateと評価World分離、取引的surface再接続。
 - ⭕️ [Pending] OS別native surface・ドッキング・GPU喪失の実機検証。
 
@@ -72,7 +73,7 @@ Current membership packing measurements and limitations: packing-performance.md;
 - 🟢 [Done] journal append／圧縮の中断、全切断位置・破損、process exit・追記再開のテスト。
 - 🟢 [Done] journal差分transaction prepare/apply、全Document複製廃止、CPU／fsync込み前後比較。
 - 🟢 [Done] bounded group commit、1syncで複数revisionを公開、正常prefix復旧・前後性能比較。
-- 🟠 [Next] Tauri async接続。
+- 🟢 [Done] Tauri async接続、有界応答待機・受理後の中断／終了drain。
   最新仕様と制約：four/autosave-journal.md。
 
 最新の差分journal性能と制約：four/journal-staging-performance.md。
@@ -87,12 +88,13 @@ Group commit仕様・計測・制約：four/group-commit-performance.md。
 
 - 🟢 [Done] Rust Document worker、有界queue、時間／件数batching、session内request結果cache・再送拒否。
 - 🟢 [Done] worker7テスト、3言語error、headless実行例。
-- 🟠 [Next] Tauri async／Renderer接続。
+- 🟢 [Done] Tauri async接続、Rust worker単一所有とrestart再送検証。
+- 🟢 [Done] Rust Renderer接続とnative surface lifecycle：worker Scene借用・世代付きtarget・resize／休止／再接続／破棄。
 仕様と保証範囲：four/worker.md。
 
 - 🟢 [Done] 永続Document ID、checkpoint／journal v2とv1移行、request/session protocol v1。
 - 🟢 [Done] 編集＋receiptの原子的記録、restart／Undo／圧縮後の再送拒否、watermarkと期限切れ。
-- 🟠 [Next] 永続エラー結果、Tauri IPC接続。
+- 🟢 [Done] Tauri IPC接続、永続window session割当と再送重複排除。
 仕様・保証範囲：four/request-protocol.md。
 
 - 🟢 [Done] ProtocolRequest Commitのgroup commit、worker自動併合、1syncで編集＋receiptを公開。
@@ -110,3 +112,22 @@ Group commit仕様・計測・制約：four/group-commit-performance.md。
 - 🟢 [Done] session lifecycle：明示終了・Active枠再利用・永続終了記録、checkpoint／journal v3とv1／v2移行。
 - 🟢 [Done] 終了後／restart／receipt淘汰後の再送抑止、書込／圧縮中断・process exit復旧。
 仕様・上限・検証：[four/session-lifecycle.md](four/session-lifecycle.md)。
+
+- 🟢 [Done] 受理済み編集エラー結果の永続化・当時の結果／revisionの再送、失敗時の連番消費。
+- 🟢 [Done] checkpoint／journal v4・旧v1〜3移行、restart後の同一結果・重複実行防止・障害復旧。
+仕様と受理境界：[four/durable-errors.md](four/durable-errors.md)。
+
+- 🟢 [Done] Tauri MockRuntimeのIPC／native接続17テスト：認可・DTO・共有所有・永続失敗・restart再送・session終了。
+- ⭕️ [Pending] 実Wry WebView／OS別IPC設定とGUIの検証。
+仕様・接続例：[four/tauri-ipc.md](four/tauri-ipc.md)。
+
+- 🟢 [Done] native wgpu Surface backendとTauri Window接続、Lost／Outdatedの有界再試行、Device Lost／OOMの描画側隔離。
+- 🟢 [Done] native lifecycle 5テスト＋実invoke追加2テスト、Scene単一所有・GPU障害後の編集保存・restart再送重複排除。
+- ⭕️ [Pending] 実OS surface／Wry表示とDPI・GPU喪失、製品UI・ドッキング。
+仕様・API・検証境界：[four/native-renderer.md](four/native-renderer.md)。
+
+- 🟢 [Done] native Window callback自動配線、worker公開後のScene変更通知、on-demand redraw scheduler。
+- 🟢 [Done] 最新サイズ／camera集約、backpressure時の閉鎖保持、休止・再開、再試行上限・公平な複数target処理。
+- 🟢 [Done] 追加6テスト：idle停止・描画中変更・応答破棄・GPU失敗・restart成功／エラー再送と非重複描画。
+- ⭕️ [Pending] 実Wry／OSのイベント配送・実GPU表示とexpose／hide-show・DPI検証。
+仕様・接続・検証境界：[four/native-redraw.md](four/native-redraw.md)。

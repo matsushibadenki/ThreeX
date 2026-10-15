@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native;
 use threex_core::{Instance, Scene, SceneStamp};
 use wgpu::util::DeviceExt;
 pub struct Renderer {

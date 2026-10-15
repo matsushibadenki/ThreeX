@@ -62,6 +62,7 @@ pub(crate) struct Receipt {
     pub expected: u64,
     pub revision: u64,
     pub commands: Vec<u8>,
+    pub failure: Option<Box<DocumentError>>,
 }
 #[derive(Default)]
 pub(crate) struct RequestLedger {
@@ -147,6 +148,9 @@ impl Document {
             {
                 return Err(RequestError::Mismatch);
             }
+            if let Some(error) = &receipt.failure {
+                return Err(RequestError::Edit(error.as_ref().clone()));
+            }
             return Ok(RequestPreparation::Replay(receipt.revision));
         }
         if self.ledger.closed.contains(&session) {
@@ -183,6 +187,7 @@ impl Document {
             expected,
             revision: edit.revision(),
             commands: commands.to_vec(),
+            failure: None,
         };
         Ok(RequestPreparation::Pending(PreparedRequest {
             edit,
@@ -204,6 +209,12 @@ impl Document {
             != prepared.prior
         {
             return Err(RequestError::Expired);
+        }
+        if prepared.prior == 0
+            && (self.ledger.sessions.len() - self.ledger.closed.len() >= 64
+                || self.ledger.sessions.len() >= MAX_SESSION_RECORDS)
+        {
+            return Err(RequestError::SessionLimit);
         }
         let revision = self
             .apply_prepared(prepared.edit)
@@ -351,6 +362,9 @@ impl<'a> RequestGroupBuilder<'a> {
             if old.kind != 1 || old.expected != r.expected || old.commands != r.commands {
                 return Err(RequestError::Mismatch);
             }
+            if let Some(error) = &old.failure {
+                return Err(RequestError::Edit(error.as_ref().clone()));
+            }
             let result = (old.revision, true);
             self.results.push(result);
             self.input_bytes += r.commands.len();
@@ -380,6 +394,7 @@ impl<'a> RequestGroupBuilder<'a> {
             expected: r.expected,
             revision,
             commands: r.commands.to_vec(),
+            failure: None,
         });
         self.sessions.insert(r.session, r.sequence);
         self.recent.push_back(Recent::Pending(index));
@@ -422,6 +437,236 @@ impl PreparedRequestGroup {
                 r.revision,
             )
         })
+    }
+}
+
+/// The original rejection and observed revision, independent of the current Scene.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestRejection {
+    pub error: DocumentError,
+    pub revision: u64,
+}
+pub struct RecordedRejection<'a> {
+    pub document: DocumentId,
+    pub session: SessionId,
+    pub sequence: u64,
+    pub kind: u8,
+    pub expected: u64,
+    pub commands: &'a [u8],
+    pub result: RequestRejection,
+}
+pub struct PreparedRejection {
+    stamp: crate::SceneStamp,
+    document: DocumentId,
+    prior: u64,
+    receipt: Receipt,
+}
+impl PreparedRejection {
+    pub fn result(&self) -> RequestRejection {
+        RequestRejection {
+            error: self.receipt.failure.as_deref().unwrap().clone(),
+            revision: self.receipt.revision,
+        }
+    }
+}
+/// Checkpoint/journal v4 bounded error codec. None means an unsupported/oversized value.
+pub fn encode_request_error(error: &DocumentError) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    match error {
+        DocumentError::RevisionConflict { current } => {
+            bytes.push(1);
+            bytes.extend(current.to_le_bytes());
+        }
+        DocumentError::CommandTooLarge => bytes.push(2),
+        DocumentError::HistoryCapacity => bytes.push(3),
+        DocumentError::RevisionExhausted => bytes.push(4),
+        DocumentError::InvalidCommand(reason) => {
+            if reason.len() > 1024 {
+                return None;
+            }
+            bytes.push(5);
+            bytes.extend(reason.as_bytes());
+        }
+        DocumentError::NothingToUndo => bytes.push(6),
+        DocumentError::NothingToRedo => bytes.push(7),
+    }
+    Some(bytes)
+}
+pub fn decode_request_error(bytes: &[u8]) -> Option<DocumentError> {
+    if bytes.is_empty() || bytes.len() > 1025 {
+        return None;
+    }
+    Some(match bytes[0] {
+        1 if bytes.len() == 9 => DocumentError::RevisionConflict {
+            current: u64::from_le_bytes(bytes[1..].try_into().ok()?),
+        },
+        2 if bytes.len() == 1 => DocumentError::CommandTooLarge,
+        3 if bytes.len() == 1 => DocumentError::HistoryCapacity,
+        4 if bytes.len() == 1 => DocumentError::RevisionExhausted,
+        5 => DocumentError::InvalidCommand(std::str::from_utf8(&bytes[1..]).ok()?.into()),
+        6 if bytes.len() == 1 => DocumentError::NothingToUndo,
+        7 if bytes.len() == 1 => DocumentError::NothingToRedo,
+        _ => return None,
+    })
+}
+impl Document {
+    pub fn replay_rejection(
+        &self,
+        document: DocumentId,
+        session: SessionId,
+        sequence: u64,
+        kind: u8,
+        expected: u64,
+        commands: &[u8],
+    ) -> Result<Option<RequestRejection>, RequestError> {
+        if self.id != Some(document) {
+            return Err(RequestError::DocumentMismatch);
+        }
+        if let Some(r) = self
+            .ledger
+            .receipts
+            .iter()
+            .find(|r| r.session == session && r.sequence == sequence)
+        {
+            if r.kind != kind || r.expected != expected || r.commands != commands {
+                return Err(RequestError::Mismatch);
+            }
+            return Ok(r.failure.as_ref().map(|e| RequestRejection {
+                error: e.as_ref().clone(),
+                revision: r.revision,
+            }));
+        }
+        Ok(None)
+    }
+    /// Only editing failures of a fresh admissible envelope become durable outcomes.
+    pub fn prepare_rejection(
+        &self,
+        document: DocumentId,
+        session: SessionId,
+        sequence: u64,
+        kind: u8,
+        expected: u64,
+        commands: &[u8],
+    ) -> Result<PreparedRejection, RequestError> {
+        if self.id != Some(document) {
+            return Err(RequestError::DocumentMismatch);
+        }
+        if sequence <= self.session_sequence(session).unwrap_or(0) {
+            return Err(RequestError::Expired);
+        }
+        let error =
+            match self.prepare_request(document, session, sequence, kind, expected, commands) {
+                Err(RequestError::Edit(error)) => error,
+                Err(other) => return Err(other),
+                Ok(_) => return Err(RequestError::Mismatch),
+            };
+        if commands.len() > self.command_limit.min(256 * 1024)
+            || !(1..=4).contains(&kind)
+            || (kind != 1 && !commands.is_empty())
+            || encode_request_error(&error).is_none()
+        {
+            return Err(RequestError::Edit(error));
+        }
+        Ok(PreparedRejection {
+            stamp: self.scene.stamp(),
+            document,
+            prior: self.session_sequence(session).unwrap_or(0),
+            receipt: Receipt {
+                session,
+                sequence,
+                kind,
+                expected,
+                revision: self.revision(),
+                commands: commands.to_vec(),
+                failure: Some(Box::new(error)),
+            },
+        })
+    }
+    /// Restore the recorded outcome; never replace it with a newly computed error/success.
+    pub fn prepare_recorded_rejection(
+        &self,
+        record: RecordedRejection<'_>,
+    ) -> Result<PreparedRejection, RequestError> {
+        let RecordedRejection {
+            document,
+            session,
+            sequence,
+            kind,
+            expected,
+            commands,
+            result,
+        } = record;
+        if self.id != Some(document) {
+            return Err(RequestError::DocumentMismatch);
+        }
+        if sequence <= self.session_sequence(session).unwrap_or(0) {
+            return Err(RequestError::Expired);
+        }
+        match self.prepare_request(document, session, sequence, kind, expected, commands) {
+            Ok(RequestPreparation::Pending(_)) | Err(RequestError::Edit(_)) => {}
+            Err(other) => return Err(other),
+            Ok(_) => return Err(RequestError::Expired),
+        }
+        if result.revision != self.revision()
+            || commands.len() > self.command_limit.min(256 * 1024)
+            || !(1..=4).contains(&kind)
+            || (kind != 1 && !commands.is_empty())
+            || encode_request_error(&result.error).is_none()
+            || match &result.error {
+                DocumentError::RevisionConflict { current } => {
+                    *current != result.revision || expected == result.revision
+                }
+                _ => expected != result.revision,
+            }
+        {
+            return Err(RequestError::Mismatch);
+        }
+        Ok(PreparedRejection {
+            stamp: self.scene.stamp(),
+            document,
+            prior: self.session_sequence(session).unwrap_or(0),
+            receipt: Receipt {
+                session,
+                sequence,
+                kind,
+                expected,
+                revision: result.revision,
+                commands: commands.to_vec(),
+                failure: Some(Box::new(result.error)),
+            },
+        })
+    }
+    pub fn apply_rejection(
+        &mut self,
+        prepared: PreparedRejection,
+    ) -> Result<RequestRejection, RequestError> {
+        if self.id != Some(prepared.document) {
+            return Err(RequestError::DocumentMismatch);
+        }
+        if self.session_sequence(prepared.receipt.session).unwrap_or(0) != prepared.prior {
+            return Err(RequestError::Expired);
+        }
+        if !self.scene.is_current(Some(&prepared.stamp)) {
+            return Err(RequestError::Edit(DocumentError::RevisionConflict {
+                current: self.revision(),
+            }));
+        }
+        if prepared.prior == 0
+            && (self.ledger.sessions.len() - self.ledger.closed.len() >= 64
+                || self.ledger.sessions.len() >= MAX_SESSION_RECORDS)
+        {
+            return Err(RequestError::SessionLimit);
+        }
+        let result = prepared.result();
+        self.ledger
+            .sessions
+            .insert(prepared.receipt.session, prepared.receipt.sequence);
+        self.ledger.bytes += prepared.receipt.commands.len();
+        self.ledger.receipts.push_back(prepared.receipt);
+        while self.ledger.receipts.len() > 64 || self.ledger.bytes > 8 * 1024 * 1024 {
+            self.ledger.bytes -= self.ledger.receipts.pop_front().unwrap().commands.len();
+        }
+        Ok(result)
     }
 }
 
@@ -869,5 +1114,162 @@ mod lifecycle_tests {
             restored.session_status(next),
             Some(SessionStatus::Active { sequence: 1 })
         );
+    }
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::*;
+    fn draft() -> (Document, DocumentId, SessionId) {
+        let mut d = Document::default();
+        let id = DocumentId::from_bytes([101; 16]).unwrap();
+        d.bind_document_id(id).unwrap();
+        (d, id, SessionId::from_bytes([102; 16]).unwrap())
+    }
+    #[test]
+    fn rejection_replays_original_error_without_history_or_scene_changes() {
+        let (mut d, id, s) = draft();
+        let hash = d.content_hash();
+        let p = d.prepare_rejection(id, s, 1, 2, 0, &[]).unwrap();
+        let result = d.apply_rejection(p).unwrap();
+        assert_eq!(
+            result,
+            RequestRejection {
+                error: DocumentError::NothingToUndo,
+                revision: 0
+            }
+        );
+        assert_eq!(d.content_hash(), hash);
+        assert_eq!(d.session_sequence(s), Some(1));
+        let mut command = [0; 64];
+        command[..4].copy_from_slice(&1u32.to_le_bytes());
+        command[4..8].copy_from_slice(&1u32.to_le_bytes());
+        d.commit(0, &command).unwrap();
+        assert_eq!(
+            d.replay_rejection(id, s, 1, 2, 0, &[]).unwrap(),
+            Some(result.clone())
+        );
+        assert!(matches!(
+            d.prepare_request(id, s, 1, 2, 0, &[]),
+            Err(RequestError::Edit(DocumentError::NothingToUndo))
+        ));
+        assert_eq!(d.scene().len(), 1);
+        let d = Document::from_checkpoint(&d.checkpoint().unwrap()).unwrap();
+        assert_eq!(
+            d.replay_rejection(id, s, 1, 2, 0, &[]).unwrap(),
+            Some(result)
+        );
+        assert!(matches!(
+            d.replay_rejection(id, s, 1, 3, 0, &[]),
+            Err(RequestError::Mismatch)
+        ));
+    }
+    #[test]
+    fn rejection_codec_bounds_and_recorded_outcome_are_stable() {
+        for error in [
+            DocumentError::RevisionConflict { current: 4 },
+            DocumentError::CommandTooLarge,
+            DocumentError::HistoryCapacity,
+            DocumentError::RevisionExhausted,
+            DocumentError::InvalidCommand("bad / 不正 / 错误".into()),
+            DocumentError::NothingToUndo,
+            DocumentError::NothingToRedo,
+        ] {
+            assert_eq!(
+                decode_request_error(&encode_request_error(&error).unwrap()),
+                Some(error)
+            );
+        }
+        for bytes in [
+            vec![],
+            vec![0],
+            vec![8],
+            vec![1],
+            vec![6, 0],
+            vec![5, 255],
+            vec![5; 1026],
+        ] {
+            assert!(decode_request_error(&bytes).is_none());
+        }
+        assert!(encode_request_error(&DocumentError::InvalidCommand("a".repeat(1025))).is_none());
+        let (mut d, id, s) = draft();
+        let result = RequestRejection {
+            error: DocumentError::InvalidCommand("older validator rejected this command".into()),
+            revision: 0,
+        };
+        // Even if a later validator would accept an empty commit, replay restores the stored error.
+        let p = d
+            .prepare_recorded_rejection(RecordedRejection {
+                document: id,
+                session: s,
+                sequence: 1,
+                kind: 1,
+                expected: 0,
+                commands: &[],
+                result: result.clone(),
+            })
+            .unwrap();
+        assert_eq!(d.apply_rejection(p).unwrap(), result);
+        assert_eq!(d.revision(), 0);
+    }
+    #[test]
+    fn stale_rejection_does_not_consume_sequence_and_failed_close_stays_active() {
+        let (mut d, id, s) = draft();
+        let pending = d.prepare_rejection(id, s, 1, 2, 0, &[]).unwrap();
+        let mut cmd = [0; 64];
+        cmd[..4].copy_from_slice(&1u32.to_le_bytes());
+        cmd[4..8].copy_from_slice(&1u32.to_le_bytes());
+        d.commit(0, &cmd).unwrap();
+        assert!(d.apply_rejection(pending).is_err());
+        assert_eq!(d.session_sequence(s), None);
+        let RequestPreparation::Pending(p) = d.prepare_request(id, s, 1, 1, 1, &[]).unwrap() else {
+            panic!()
+        };
+        d.apply_request(p).unwrap();
+        let p = d.prepare_rejection(id, s, 2, 4, 0, &[]).unwrap();
+        d.apply_rejection(p).unwrap();
+        assert_eq!(
+            d.session_status(s),
+            Some(SessionStatus::Active { sequence: 2 })
+        );
+        let RequestPreparation::Pending(p) = d.prepare_request(id, s, 3, 4, 1, &[]).unwrap() else {
+            panic!()
+        };
+        d.apply_request(p).unwrap();
+        assert_eq!(
+            d.session_status(s),
+            Some(SessionStatus::Closed { sequence: 3 })
+        );
+        assert!(Document::from_checkpoint(&d.checkpoint().unwrap()).is_ok());
+    }
+    #[test]
+    fn metadata_only_interleaving_cannot_overfill_active_session_capacity() {
+        let (mut d, id, _) = draft();
+        for n in 1..64 {
+            let mut b = [0; 16];
+            b[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            let session = SessionId::from_bytes(b).unwrap();
+            let RequestPreparation::Pending(p) =
+                d.prepare_request(id, session, 1, 1, 0, &[]).unwrap()
+            else {
+                panic!()
+            };
+            d.apply_request(p).unwrap();
+        }
+        let a = SessionId::from_bytes([121; 16]).unwrap();
+        let b = SessionId::from_bytes([122; 16]).unwrap();
+        let c = SessionId::from_bytes([123; 16]).unwrap();
+        let pa = d.prepare_rejection(id, a, 1, 2, 0, &[]).unwrap();
+        let pb = d.prepare_rejection(id, b, 1, 2, 0, &[]).unwrap();
+        let RequestPreparation::Pending(pc) = d.prepare_request(id, c, 1, 1, 0, &[]).unwrap()
+        else {
+            panic!()
+        };
+        d.apply_rejection(pa).unwrap();
+        assert_eq!(d.apply_rejection(pb), Err(RequestError::SessionLimit));
+        assert_eq!(d.apply_request(pc), Err(RequestError::SessionLimit));
+        assert_eq!(d.session_sequence(b), None);
+        assert_eq!(d.session_sequence(c), None);
+        assert!(Document::from_checkpoint(&d.checkpoint().unwrap()).is_ok());
     }
 }

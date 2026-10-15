@@ -84,7 +84,8 @@ cargo clippy --offline --workspace --all-targets --all-features -- -D warnings
 `hierarchy-{before,after}.csv`。comparison CSV／metadata JSONも保存。symlink不要。
 
 - 🟢 [Done] 構造検証・辺更新の差分化、正常prefix復旧維持、性能比較。
-- 🟠 [Next] worker／Tauri接続・request重複排除、深さ・fanoutを変えた性能試験の拡充。
+- 🟢 [Done] worker／Tauri接続・永続request重複排除（[仕様](tauri-ipc.md)）。
+- 🟠 [Next] 深さ・fanoutを変えた性能試験の拡充。
 - ⭕️ [Pending] 実電源断、他OS durability、GPU／実UI検証。
 
 English: Structural validation visits changed ancestor paths and references to deleted parents.

@@ -64,7 +64,7 @@ npm test
 ```
 
 - 🟢 [Done] 意味内容hash v1、snapshot／保存receipt／worker明示query、正規化・保存／復旧テスト。
-- 🟠 [Next] 永続エラー結果、Tauri async／IPC認可・Renderer接続。
+- 🟢 [Done] Tauri async／IPC認可・Rust Renderer接続（[仕様](native-renderer.md)）。
 - 🔴 [Later] 評価World分離と非同期評価結果guard、必要に応じた差分hash。
 - ⭕️ [Pending] 実UI・WASM／実GPU・他OS durability検証。
 

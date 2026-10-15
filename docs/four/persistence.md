@@ -1,3 +1,5 @@
+> 現行checkpoint／journalはv4、受理済み編集エラーを保存する。[最新仕様](durable-errors.md)。
+
 > 現行checkpoint／journalはv3。v1／v2読込とsession終了記録の移行を実装。[最新仕様](session-lifecycle.md)。
 
 > 意味内容hash v1を実装。checkpoint format v2は維持し、保存receiptと明示queryにhashを返す。[最新仕様](content-hash.md)。
@@ -89,7 +91,7 @@ Unsupportedを返す（rename済の可能性あり）。Windows／Linux実機、
 Tauriのファイル認可・UI・未保存確認・エラー翻訳は次工程。
 
 - 🟢 [Done] Document v1保存・読込、履歴復元、世代rollbackと障害注入／プロセス終了テスト。
-- 🟠 [Next] 永続Document ID、意味内容hash、autosave／journal・移行・Tauri接続。
+- 🟢 [Done] 永続Document ID、意味内容hash、autosave／journal・移行・Tauri接続（[仕様](tauri-ipc.md)）。
 - ⭕️ [Pending] 電源断・実容量不足・Windows／Linux durabilityと実UI確認。
 
 English: Version 1 stores stable IDs, complete attributes, revision, and bounded undo/redo.

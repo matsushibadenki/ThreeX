@@ -103,7 +103,7 @@ core34＋storage41＋WGSL1＋JS4＝80件成功。core／storageはdebug・releas
 
 - 🟢 [Done] worker ProtocolRequest候補prefixの差分検証・準備結果直接journal送信。
 - 🟢 [Done] restart重複排除・障害prefix復旧、before／after CPUと実worker応答比較。
-- 🟠 [Next] 永続エラー結果、Tauri async／Renderer接続。
+- 🟢 [Done] Tauri async／Rust Renderer接続・native surface lifecycle（[仕様](native-renderer.md)）。
 - ⭕️ [Pending] 実電源断・容量不足・他OS durability・実UI／GPUの統合検証。
 
 English: The worker retains validated scene/session/receipt deltas and validates only each added

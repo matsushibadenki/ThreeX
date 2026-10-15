@@ -88,7 +88,7 @@ macOSでのfilesystemテスト。実電源断・実disk-full・Windows／Linux d
 全DocumentをframeごとにIPC送信することはない。保存先は引き続き1文書専用。
 
 - 🟢 [Done] Rust自動journal、最後の正常transaction復旧、切断・破損・process exitテスト。
-- 🟠 [Next] group commitとTauri worker／IPC接続、request再送重複排除。
+- 🟢 [Done] group commitとTauri worker／IPC接続、永続request再送重複排除（[仕様](tauri-ipc.md)）。
 - ⭕️ [Pending] 実電源断・容量不足・他OS・実UIの復旧確認。
 
 English: The Rust AutosaveDocument owner writes commits, undo and redo to a bounded,

@@ -11,7 +11,7 @@ pub enum CheckpointError {
     InvalidScene(String),
 }
 const MAGIC: &[u8; 8] = b"THREEXD\0";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 pub const MAX_CHECKPOINT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_HISTORY: usize = 8 * 1024 * 1024;
 const MAX_COMMAND: usize = 256 * 1024;
@@ -73,6 +73,12 @@ impl Document {
                 b.extend(value.to_le_bytes())
             }
             b.push(r.kind);
+            let error = match &r.failure {
+                None => Vec::new(),
+                Some(e) => crate::encode_request_error(e).ok_or(CheckpointError::TooLarge)?,
+            };
+            b.extend((error.len() as u32).to_le_bytes());
+            b.extend(error);
             b.extend(&r.commands);
         }
         if b.len() + 4 > MAX_CHECKPOINT_BYTES {
@@ -189,6 +195,22 @@ impl Document {
                 let revision = r.u64()?;
                 let count = r.size(MAX_COMMAND)?;
                 let kind = r.take(1)?[0];
+                let failure = if version >= 4 {
+                    let count = u32::from_le_bytes(r.take(4)?.try_into().unwrap()) as usize;
+                    if count > 1025 {
+                        return Err(CheckpointError::TooLarge);
+                    }
+                    if count == 0 {
+                        None
+                    } else {
+                        Some(Box::new(
+                            crate::decode_request_error(r.take(count)?)
+                                .ok_or(CheckpointError::Corrupt)?,
+                        ))
+                    }
+                } else {
+                    None
+                };
                 if sequence == 0
                     || !keys.insert((session, sequence))
                     || document
@@ -197,17 +219,26 @@ impl Document {
                         .get(&session)
                         .is_none_or(|&high| sequence > high)
                     || revision > document.revision()
-                    || (expected != revision && expected.checked_add(1) != Some(revision))
+                    || (failure.is_none()
+                        && expected != revision
+                        && expected.checked_add(1) != Some(revision))
+                    || failure.as_deref().is_some_and(|e| match e {
+                        crate::DocumentError::RevisionConflict { current } => {
+                            *current != revision || expected == revision
+                        }
+                        _ => expected != revision,
+                    })
                     || !(1..=if version >= 3 { 4 } else { 3 }).contains(&kind)
                     || (kind == 4
+                        && failure.is_none()
                         && (expected != revision
                             || !document.ledger.closed.contains(&session)
                             || document.ledger.sessions[&session] != sequence))
                     || (document.ledger.closed.contains(&session)
                         && document.ledger.sessions[&session] == sequence
-                        && kind != 4)
+                        && (kind != 4 || failure.is_some()))
                     || (kind != 1 && count != 0)
-                    || !count.is_multiple_of(64)
+                    || (failure.is_none() && !count.is_multiple_of(64))
                 {
                     return Err(CheckpointError::Corrupt);
                 }
@@ -223,6 +254,7 @@ impl Document {
                     expected,
                     revision,
                     commands,
+                    failure,
                 });
             }
             if sessions > 0 && document.id.is_none() {
@@ -405,10 +437,10 @@ mod tests {
             Err(CheckpointError::Corrupt)
         ));
         let mut b = bytes.clone();
-        b[8..12].copy_from_slice(&4u32.to_le_bytes());
+        b[8..12].copy_from_slice(&5u32.to_le_bytes());
         assert!(matches!(
             Document::from_checkpoint(&b),
-            Err(CheckpointError::UnsupportedVersion(4))
+            Err(CheckpointError::UnsupportedVersion(5))
         ));
         let mut b = bytes.clone();
         b[36..44].copy_from_slice(&u64::MAX.to_le_bytes());
@@ -436,6 +468,7 @@ mod tests {
         let flag = 108;
         assert_eq!(original[flag], 0);
         let mut legacy = original[..original.len() - 4].to_vec();
+        legacy.drain(166..170);
         legacy.remove(flag);
         legacy[8..12].copy_from_slice(&2u32.to_le_bytes());
         legacy.extend(checksum(&legacy).to_le_bytes());
@@ -467,5 +500,36 @@ mod tests {
         corrupt[flag] = 0;
         corrupt.extend(checksum(&corrupt).to_le_bytes());
         assert!(Document::from_checkpoint(&corrupt).is_err());
+    }
+    #[test]
+    fn v3_session_tombstones_migrate_with_success_receipts() {
+        let mut d = Document::default();
+        let id = crate::DocumentId::from_bytes([104; 16]).unwrap();
+        d.bind_document_id(id).unwrap();
+        let session = crate::SessionId::from_bytes([105; 16]).unwrap();
+        for (sequence, kind) in [(1, 1), (2, 4)] {
+            let crate::RequestPreparation::Pending(p) = d
+                .prepare_request(id, session, sequence, kind, 0, &[])
+                .unwrap()
+            else {
+                panic!()
+            };
+            d.apply_request(p).unwrap();
+        }
+        let mut old = d.checkpoint().unwrap();
+        old.truncate(old.len() - 4);
+        old.drain(219..223);
+        old.drain(166..170);
+        old[8..12].copy_from_slice(&3u32.to_le_bytes());
+        old.extend(checksum(&old).to_le_bytes());
+        let restored = Document::from_checkpoint(&old).unwrap();
+        assert_eq!(
+            restored.session_status(session),
+            Some(crate::SessionStatus::Closed { sequence: 2 })
+        );
+        assert!(matches!(
+            restored.prepare_request(id, session, 1, 1, 0, &[]),
+            Ok(crate::RequestPreparation::Replay(0))
+        ));
     }
 }

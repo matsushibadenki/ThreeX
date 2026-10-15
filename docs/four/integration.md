@@ -5,7 +5,7 @@
 | Four要件 | ThreeXへの採用 | 状態 |
 | --- | --- | --- |
 | R-01 Rust独立コア | coreはwgpu／Tauri非依存 | 🟢 [Done] |
-| R-02 Rust状態所有 | Document編集所有者と読取Scene境界 | 🟢 [Done] 初期Rustサービス。Tauri統合は未実装 |
+| R-02 Rust状態所有 | Document編集所有者と読取Scene境界 | 🟢 [Done] 初期Rustサービス。Tauri async／IPC接続済み。実Wry検証はPending |
 | R-04 差分更新 | SoA、子孫Transform、membership、送信journal | 🟢 [Done] 既存実装を維持 |
 | R-07 取引・履歴 | revision検証・Undo/Redo・有界履歴 | 🟢 [Done] メモリ内取引＋v1保存／読込・履歴復旧 |
 | R-08 再現計測 | 既存CPUベンチとraw CSV | 🟢 [Done] CPUのみ。Four B-01〜06は未完了 |
@@ -19,7 +19,7 @@
 - 🟢 [Done] 競合・無効編集・容量拒否・親子削除復元・no-op・分岐・安定IDのテスト。
 - 🟢 [Done] version付き保存・読込、世代復旧、IO障害／プロセス終了テスト（persistence.md）。
 - 🟢 [Done] 永続Document ID、v1移行、意味内容hash v1。
-- 🟠 [Next] Tauriホストの単一書込経路、version付きIPC、request重複排除、エラー翻訳。
+- 🟢 [Done] Tauriホストの単一書込経路、v1 IPC、request重複排除、3言語エラー翻訳。
 - 🔴 [Later] WorkspaceStateレイアウト木、surface移動の取引、独立評価world。
 - 🔴 [Later] メッシュ局所編集・GPU culling・streaming。既存roadmapと重複開発しない。
 - ⭕️ [Pending] OS別surface、GPU喪失、再ドッキング、WASM／GPU実表示検証。
@@ -56,14 +56,15 @@ Document単体はメモリ内。threex-storageによる明示保存で履歴を�
 - 🟢 [Done] 未保存変更の自動journalと正常transactionまでの復旧：[autosave-journal.md](autosave-journal.md)。
 - 🟢 [Done] journalの差分prepare/applyと前後2組の性能比較。
 - 🟢 [Done] group commit／障害復旧・fsync回数／性能比較。
-- 🟠 [Next] worker接続／時間batching・request重複排除。
+- 🟢 [Done] worker接続／時間batching・永続request重複排除。
 
 - 🟢 [Done] 累積prefix再検証を変更ID overlayへ差分化：[group-prefix-performance.md](group-prefix-performance.md)。
 
 - 🟢 [Done] 構造検証・隣接表差分化と親削除＋付け替えの末尾復旧：[structure-performance.md](structure-performance.md)。
 
 - 🟢 [Done] Rust worker／有界queue／session内request重複排除：[worker.md](worker.md)。
-- 🟠 [Next] Tauri async境界、永続request/session、Renderer接続。
+- 🟢 [Done] Tauri async境界、永続request/session。
+- 🟢 [Done] native Renderer接続と世代付きsurface lifecycle。
 
 - 🟢 [Done] 永続ID／request sessionと再起動後の再送抑止：[request-protocol.md](request-protocol.md)。
 
@@ -76,3 +77,11 @@ Document単体はメモリ内。threex-storageによる明示保存で履歴を�
 - 🟢 [Done] 意味内容hash v1・保存receipt／worker query・復旧検証：[content-hash.md](content-hash.md)。
 
 - 🟢 [Done] session終了・Active枠再利用・v3永続化と移行・終了後／restart後の再送抑止：[session-lifecycle.md](session-lifecycle.md)。
+
+- 🟢 [Done] 受理済み編集エラーの永続化・元結果の再送・v4移行／重複排除検証：[durable-errors.md](durable-errors.md)。
+
+[IPCの認可・DTO・検証範囲](tauri-ipc.md)。
+
+🟢 [Done] Rust Renderer／native surface接続・世代付きlifecycleとworker Scene借用：[仕様・検証](native-renderer.md)。実OS／GPU表示は⭕️ [Pending]。
+
+🟢 [Done] native Windowイベント自動配線とon-demand redraw scheduler：[仕様・検証](native-redraw.md)。実OS／GPUイベント・表示は⭕️ [Pending]。

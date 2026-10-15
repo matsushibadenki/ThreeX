@@ -3,7 +3,9 @@ mod identity;
 mod journal;
 mod protocol;
 pub use identity::new_session_id;
-pub use protocol::{ProtocolAction, ProtocolReceipt, ProtocolRequest, REQUEST_PROTOCOL_VERSION};
+pub use protocol::{
+    ProtocolAction, ProtocolFailure, ProtocolReceipt, ProtocolRequest, REQUEST_PROTOCOL_VERSION,
+};
 mod worker;
 pub use journal::AutosaveDocument;
 use std::{
@@ -31,6 +33,7 @@ pub enum StorageError {
     IdentityMismatch,
     UnsupportedRequestProtocol,
     Request(threex_core::RequestError),
+    Rejected(ProtocolFailure),
     UnsupportedJournalVersion,
     JournalLimit,
     Edit(threex_core::DocumentError),
@@ -458,15 +461,15 @@ mod tests {
         let receipt = store.save(&d).unwrap();
         let path = store.path(receipt.generation);
         let mut b = fs::read(&path).unwrap();
-        b[8..12].copy_from_slice(&4u32.to_le_bytes());
+        b[8..12].copy_from_slice(&5u32.to_le_bytes());
         fs::write(&path, &b).unwrap();
         assert!(matches!(
             store.load(),
-            Err(StorageError::Format(CheckpointError::UnsupportedVersion(4)))
+            Err(StorageError::Format(CheckpointError::UnsupportedVersion(5)))
         ));
         assert!(matches!(
             store.save(&d),
-            Err(StorageError::Format(CheckpointError::UnsupportedVersion(4)))
+            Err(StorageError::Format(CheckpointError::UnsupportedVersion(5)))
         ));
         assert_eq!(fs::read(path).unwrap(), b);
         let lock = OpenOptions::new()

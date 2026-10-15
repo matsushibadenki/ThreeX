@@ -38,3 +38,11 @@ worker 协议候选保留已验证差分并直接写入已准备的分组，保�
 已实现编辑内容 hash v1，支持 Document／快照、保存结果及 worker 显式查询，保留原有版本／请求校验。[规范与验证](content-hash.md)。
 
 已实现会话生命周期，v3 检查点／日志持久化关闭记录并回收活动名额，兼容迁移 v1／v2，验证关闭及重启后的重发去重。[规范](session-lifecycle.md)。
+
+已受理的编辑错误持久化为 v4 结果，重发保持原错误／版本，修正请求使用下一序号。[受理与恢复规范](durable-errors.md)。
+
+2026-10-15：🟢 [Done] 已实现Tauri异步IPC、调用方授权和三语言错误DTO。实际invoke测试验证Rust worker所有权及重启后去重。实际Wry及渲染器集成仍待验证。 [IPC](tauri-ipc.md)。
+
+2026-10-15：🟢 [Done] 已实现Rust渲染器连接和原生表面生命周期，借用worker的Scene，验证代际替换、暂停、销毁及有界重试。保持Document单一所有权和重启后请求去重。实际系统与GPU显示仍待验证。 [Native Renderer](native-renderer.md)。
+
+2026-10-15：🟢 [Done] 已实现原生窗口回调连接和按需重绘调度器。持久Scene变更通知绘制，验证事件合并、队列繁忙时保留请求、有界重试、暂停、关闭及重启后去重。实际系统事件配送和GPU显示仍待验证。 [Redraw](native-redraw.md)。
