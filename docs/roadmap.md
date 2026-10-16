@@ -22,7 +22,9 @@
 - 🟢 [Done] Visibility/Mesh/entity lifecycle before/after CPU and planned-upload benchmarks.
 - 🟢 [Done] Incremental structural validation and adjacency for create/delete/reparent.
 - 🟢 [Done] Shared material RGB changes and material replacement mark affected meshes dirty.
-- 🟠 [Next] Full camera behavior, Plane/Sphere geometry.
+- 🟢 [Done] Perspective camera rotation／parent TRS／zoom／world lookAt、Rust view／projection math（camera.md）。
+- 🟢 [Done] Plane／Sphere geometry、共有GPU mesh・差分描画区間、Box wire／Instance互換（geometry.md）。
+- 🟠 [Next] geometry別batching、任意分割、camera view offset／film設定などの互換API。
 - 🟢 [Done] Release CPU scene benchmark at 100 / 1k / 10k / 100k objects, before/after CSV.
 - 🟠 [Next] GPU Scene / compute culling and four-way rendered 100k-cube comparison.
 - 🔴 [Later] Indirect draws, LOD, Hi-Z, Forward+, render graph, PBR.
@@ -38,9 +40,9 @@ and limitations are in soa-performance.md. GPU/power measurements remain pending
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust core: 48 passed; storage: 58 passed in debug and release. Tauri IPC / native scheduler: 17 passed. Renderer lifecycle: 5 passed; WGSL validation: 1 passed.
-- Current native suite: 129 passed in debug and release; JS: 4 passed.
-- JS compatibility tests: 4 passed.
+- Rust core: 52 passed; storage: 60 passed; renderer: 9 passed; Tauri host: 17 passed in debug and release. Tauri IPC / native scheduler: 17 passed. Renderer lifecycle: 5 passed; WGSL validation: 1 passed.
+- Current native suite: 138 passed in debug and release; JS: 12 passed.
+- JS compatibility tests: 12 passed.
 - Native GPU test: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.
 
@@ -131,3 +133,12 @@ Group commit仕様・計測・制約：four/group-commit-performance.md。
 - 🟢 [Done] 追加6テスト：idle停止・描画中変更・応答破棄・GPU失敗・restart成功／エラー再送と非重複描画。
 - ⭕️ [Pending] 実Wry／OSのイベント配送・実GPU表示とexpose／hide-show・DPI検証。
 仕様・接続・検証境界：[four/native-redraw.md](four/native-redraw.md)。
+
+- 🟢 [Done] camera CPU計算・互換テスト追加（Rust 3／JS 5）、既存Document／native scheduler回帰を検証。
+- ⭕️ [Pending] 新WASM camera bindingのtargetビルド・browser／GPU表示検証。
+仕様と制約：[camera.md](camera.md)。
+
+- 🟢 [Done] geometry flags、checkpoint／journal v5とv1–4移行、content hash v2。
+- 🟢 [Done] Box・混在形状の差分描画計画、形状のみの更新・history・末尾復旧・再送、writer unlockの回帰検証。
+- ⭕️ [Pending] 3形状の実GPU／WASM表示。Metal adapter取得不可。
+仕様・制約：[geometry.md](geometry.md)。

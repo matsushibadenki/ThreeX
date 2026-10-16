@@ -42,6 +42,30 @@ mod browser {
                 config,
             })
         }
+        pub fn render_camera(
+            &mut self,
+            commands: &[u8],
+            nodes: &[f32],
+            projection: &[f32],
+            width: u32,
+            height: u32,
+        ) -> Result<(), JsValue> {
+            if projection.len() != 5 {
+                return Err(JsValue::from_str("Invalid camera projection"));
+            }
+            let p = threex_core::Perspective {
+                fov: projection[0],
+                aspect: projection[1],
+                near: projection[2],
+                far: projection[3],
+                zoom: projection[4],
+            };
+            let vp = p
+                .view_projection(nodes)
+                .map_err(|e| JsValue::from_str(&format!("Invalid camera: {e:?}")))?;
+            let flat: [f32; 16] = std::array::from_fn(|i| vp[i / 4][i % 4]);
+            self.render(commands, &flat, width, height)
+        }
         pub fn render(
             &mut self,
             commands: &[u8],

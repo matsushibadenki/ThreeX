@@ -22,23 +22,23 @@ npm test
 
 ## Implemented contract
 
-Scene, Group, Object3D, Mesh, BoxGeometry, MeshBasicMaterial,
-PerspectiveCamera (translation only), WebGPURenderer.
+Scene, Group, Object3D, Mesh, BoxGeometry, PlaneGeometry, SphereGeometry, MeshBasicMaterial,
+PerspectiveCamera (rotation, parent TRS, zoom and world-space lookAt), WebGPURenderer.
 Transforms use XYZ Euler radians. Box dimensions are combined with object scale.
 Call `render()` after changing transforms or visibility. Structural changes reconcile
 entities; transform changes send only dirty objects. Runtime state and GPU buffers
 live in Rust. Geometry is shared; cubes render in one instanced indexed draw.
 
 Binary records are 64 bytes, little endian: opcode u32, entity u32, twelve f32
-(position, rotation, scale, RGB), flags u32 (visible=1, mesh=2), parent u32.
+(position, rotation, scale, RGB), flags u32 (visible=1, mesh=2, geometry=bits 2–3), parent u32.
 Opcodes: create=1, update=2, delete=3. Entity zero is reserved. JS IDs never reuse.
 Batches are validated atomically; hierarchy cycles and missing parents are rejected.
 
 ## Current limits
 
 Material RGB color changes and material replacement are tracked, including shared
-materials. Geometry mutations are not tracked; replace the mesh for these changes. Camera rotation, lookAt, lighting/PBR, GPU culling, resource pools,
-asset loading, Tauri windows and docking are not implemented.
+materials. Geometry is immutable; replacing mesh.geometry marks only that mesh dirty. Lighting/PBR, GPU culling, resource pools,
+asset loading and the complete native application UI/docking are not implemented.
 The Rust scene stores transforms and render attributes in SoA arrays, with a
 transactional changed-entity overlay and cached world matrices. Changes evaluate
 only the affected subtree. Color changes do not evaluate matrices. Cached packed
@@ -151,3 +151,7 @@ recovery and durable restart deduplication. [Benchmarks and limits](docs/four/pr
 🟢 [Done] Rust Renderer／native surface接続・世代付きlifecycleとworker Scene借用：[仕様・検証](docs/four/native-renderer.md)。実OS／GPU表示は⭕️ [Pending]。
 
 🟢 [Done] native Windowイベント自動配線とon-demand redraw scheduler：[仕様・検証](docs/four/native-redraw.md)。実OS／GPUイベント・表示は⭕️ [Pending]。
+
+Camera contracts, Rust computation and pending WASM verification: [docs/camera.md](docs/camera.md).
+
+[Primitive geometry, incremental mixed draws and v5 persistence](docs/geometry.md). Content hash schema is v2.

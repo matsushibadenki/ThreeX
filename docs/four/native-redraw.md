@@ -1,3 +1,5 @@
+> 2026-10-16：geometry対応により現行保存形式はcheckpoint／journal v5、content hash v2。旧v1–4を移行。[仕様](../geometry.md)。
+
 # Nativeイベント配線とon-demand redraw
 
 🟢 [Done] Tauri native windowのcallback登録、編集後の自動再描画、coalescing、backpressure保持と終了処理。

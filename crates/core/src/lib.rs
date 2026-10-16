@@ -1,4 +1,8 @@
 //! Retained scene database. Commands are little-endian fixed 64-byte records.
+mod geometry;
+pub use geometry::GeometryKind;
+mod camera;
+pub use camera::{CameraError, Perspective};
 mod content_hash;
 pub use content_hash::{CONTENT_HASH_VERSION, ContentHash};
 mod checkpoint;
@@ -32,6 +36,7 @@ pub struct Object {
     pub visible: bool,
     pub parent: u32,
     pub mesh: bool,
+    pub geometry: GeometryKind,
 }
 impl Default for Object {
     fn default() -> Self {
@@ -43,6 +48,7 @@ impl Default for Object {
             visible: true,
             parent: 0,
             mesh: false,
+            geometry: GeometryKind::Box,
         }
     }
 }

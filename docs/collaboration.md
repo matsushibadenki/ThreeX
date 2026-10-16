@@ -269,3 +269,30 @@ schedulerへwakeを送る。DocumentやSceneをwindow／schedulerへ複製せず
 
 シンボリックリンクへのCargo path／include／import／実行時依存は追加していない。
 [仕様・検証境界](four/native-redraw.md)。
+
+## Perspective camera
+
+2026-10-16。Universal-3Dのcamera_basis／camera_matrixにおけるeye／target／upと
+右手系の視点構築を参照した。ThreeXは既存XYZ radians／親TRSとWebGPU depth 0..1を維持し、
+Rustの可逆affine view計算へ接続した。相手のorbit distance／pitch／yawや保存camera形式を
+ThreeXの互換契約へ流用していない。相手ソースは参照のみ。
+
+- 🟢 [Done] camera回転・親TRS・zoom・world lookAtとCPU検証。
+- ⭕️ [Pending] 実GPU／browser／相手アプリを含む視点・文書交換検証。
+
+シンボリックリンクへのCargo path／import／include／実行時依存は追加していない。
+[仕様と検証境界](camera.md)。
+
+## Plane／Sphereと差分描画
+
+2026-10-16。Universal-3Dのshared cube／sphere／plane生成と形状別描画を参照した。
+ThreeXはThree互換のXY中心Plane、radius=1のSphereを採用し、相手のXZ plane／radius=.5 sphereとは
+単位形状を区別する。相手形式の直接importや同じgeometry IDの互換を仮定しない。
+ThreeXの既存Box vertex/index・64-byte wire・80-byte Instanceを保持し、形状のみのdirty更新を追加した。
+
+- 🟢 [Done] shared geometry、差分描画区間、保存形式v5・hash v2、旧形式移行・復旧・再送検証。
+- 🟠 [Next] 形状の交互配置でもdraw数を抑えるbatching。
+- ⭕️ [Pending] 実GPU／browser表示・相手アプリとの文書交換。
+
+相手ソースは参照のみ。シンボリックリンクへのimport／include／Cargo path／実行時依存は追加していない。
+[仕様と検証境界](geometry.md)。

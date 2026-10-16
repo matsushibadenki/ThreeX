@@ -1,3 +1,5 @@
+> 2026-10-16：geometry対応により現行保存形式はcheckpoint／journal v5、content hash v2。旧v1–4を移行。[仕様](../geometry.md)。
+
 > 現行checkpoint／journalはv4、受理済み編集エラーを保存する。[最新仕様](durable-errors.md)。
 
 > 現行checkpoint／journalはv3。v1／v2読込とsession終了記録の移行を実装。[最新仕様](session-lifecycle.md)。

@@ -1,13 +1,19 @@
+pub mod geometry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
-use threex_core::{Instance, Scene, SceneStamp};
+use threex_core::{GeometryKind, Instance, Scene, SceneStamp};
+struct MeshBuffers {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    count: u32,
+}
 use wgpu::util::DeviceExt;
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    geometries: [MeshBuffers; 3],
+    runs: geometry::GeometryRuns,
     instances: wgpu::Buffer,
     camera: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -19,20 +25,6 @@ pub struct Renderer {
 }
 impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let vertices: [[f32; 3]; 8] = [
-            [-0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, 0.5, 0.5],
-            [-0.5, 0.5, 0.5],
-        ];
-        let indices: [u16; 36] = [
-            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 1, 2, 6, 1, 6,
-            5, 0, 4, 7, 0, 7, 3,
-        ];
         let buffer = |label, bytes: &[u8], usage| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
@@ -40,16 +32,23 @@ impl Renderer {
                 usage,
             })
         };
-        let vertices = buffer(
-            "cube vertices",
-            bytemuck::cast_slice(&vertices),
-            wgpu::BufferUsages::VERTEX,
-        );
-        let indices = buffer(
-            "cube indices",
-            bytemuck::cast_slice(&indices),
-            wgpu::BufferUsages::INDEX,
-        );
+        let geometries =
+            [GeometryKind::Box, GeometryKind::Plane, GeometryKind::Sphere].map(|kind| {
+                let data = geometry::unit_geometry(kind);
+                MeshBuffers {
+                    vertices: buffer(
+                        "shared geometry",
+                        bytemuck::cast_slice(&data.vertices),
+                        wgpu::BufferUsages::VERTEX,
+                    ),
+                    indices: buffer(
+                        "shared indices",
+                        bytemuck::cast_slice(&data.indices),
+                        wgpu::BufferUsages::INDEX,
+                    ),
+                    count: data.indices.len() as u32,
+                }
+            });
         let camera = buffer(
             "camera",
             bytemuck::cast_slice(&threex_core::identity()),
@@ -96,8 +95,8 @@ impl Renderer {
             device,
             queue,
             pipeline,
-            vertices,
-            indices,
+            geometries,
+            runs: Default::default(),
             instances,
             camera,
             bind,
@@ -132,6 +131,7 @@ impl Renderer {
                 });
             }
             let updates = scene.instance_updates_since(self.stamp.as_ref(), reallocated);
+            self.runs.sync(data, updates.ranges.clone());
             for range in updates.ranges {
                 self.queue.write_buffer(
                     &self.instances,
@@ -197,10 +197,13 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind, &[]);
-            pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_vertex_buffer(1, self.instances.slice(..));
-            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..36, 0, 0..self.count);
+            for (kind, range) in self.runs.draws() {
+                let geometry = &self.geometries[kind as usize];
+                pass.set_vertex_buffer(0, geometry.vertices.slice(..));
+                pass.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..geometry.count, 0, range);
+            }
         }
         self.queue.submit([encoder.finish()]);
     }
@@ -264,6 +267,22 @@ mod tests {
                 &vp,
             );
             assert_eq!(renderer.count, 1);
+            for (id, flags) in [(2u32, 7u32), (3, 11)] {
+                let mut extra = commands;
+                extra[4..8].copy_from_slice(&id.to_le_bytes());
+                extra[68..72].copy_from_slice(&id.to_le_bytes());
+                extra[120..124].copy_from_slice(&flags.to_le_bytes());
+                scene.apply(&extra).unwrap();
+            }
+            renderer.render(
+                &scene,
+                &target.create_view(&Default::default()),
+                32,
+                32,
+                &vp,
+            );
+            assert_eq!(renderer.count, 3);
+            assert_eq!(renderer.runs.draws().count(), 3);
             assert!(renderer.device.pop_error_scope().await.is_none());
         });
     }

@@ -1,3 +1,5 @@
+> 2026-10-16：geometry対応により現行保存形式はcheckpoint／journal v5、content hash v2。旧v1–4を移行。[仕様](../geometry.md)。
+
 # Tauri async接続とIPC境界
 
 🟢 [Done] `threex-tauri-host` はTauri 2の実invoke handler、async command、認可、3言語のエラーDTOを提供する。

@@ -320,7 +320,7 @@ mod tests {
         drop(a);
         assert_eq!(
             &fs::read(t.0.join("autosave.txj")).unwrap()[..8],
-            b"THREEXJ4"
+            b"THREEXJ5"
         );
         let a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
         assert_eq!(a.document().document_id(), Some(id));
@@ -1006,7 +1006,7 @@ mod tests {
         old[16 + length..20 + length].copy_from_slice(&c.to_le_bytes());
         fs::write(&path, old).unwrap();
         let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
-        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ4");
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ5");
         assert!(a.request(&edit).unwrap().replayed);
         let close = ProtocolRequest {
             sequence: 2,

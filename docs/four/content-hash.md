@@ -1,21 +1,21 @@
-> 現行のsession上限・終了・保存形式v3は[session lifecycle](session-lifecycle.md)を参照。以下の性能／導入記録は計測当時の条件。
+> 2026-10-16：現行はhash v2／保存形式v5。geometryを含む[変更仕様](../geometry.md)。
 
-# 意味内容hash v1
+# 意味内容hash v2
 
 2026-10-15 JST。`Document::content_hash()`と`DocumentSnapshot::content_hash()`を実装。
 `ContentHash`は32byteのSHA-256で、Displayは小文字64桁hex。
-永続化／交換する側は`CONTENT_HASH_VERSION = 1`と組にして扱う。
+永続化／交換する側は`CONTENT_HASH_VERSION = 2`と組にして扱う。
 
 ## 正規化仕様
 
 SHA-256への入力は以下の順序。数値はlittle endian。checkpointのbyte列そのものはhashしない。
 
 1. ASCII `THREEX-CONTENT`＋NUL。
-2. hash schema version（u32＝1）。
+2. hash schema version（u32＝2）。
 3. Object数（u64）。
 4. Object ID昇順に各60byte：ID（u32）、position／rotation／scale／colorの順の12個のf32、flags（u32）、parent ID（u32）。
 
-flagsはbit0＝visible、bit1＝mesh。他bitは0。
+flagsはbit0＝visible、bit1＝mesh、bits2–3＝geometry（Box=0／Plane=1／Sphere=2）。他bitは0。
 f32はIEEE754 bitsを使用し、+0／-0のみ同じ0bitへ正規化する。
 Documentは既存の編集検証で非有限数を拒否する。公開snapshotを外部で直接変更した場合、このAPIは再検証しない。
 角度の周期・異なる親子構造・同じ見た目の別Object IDを同一化しない。描画結果ではなく編集元の意味内容を識別する。
@@ -34,7 +34,7 @@ Undoで以前の内容へ戻れば同じhashになり、Redoで再編集内容�
 
 workerの通常state／edit応答では毎回hashしない。計算はO(Object数)、追加の作業メモリは一定。
 明示queryと保存captureは全Objectを走査する。差分Merkle hashやhash cacheは今回導入していない。
-checkpoint／journal formatは現在v3（hash導入時はv2）で、hashは保存receiptのメモリ上の情報。読込後は内容から再計算する。
+checkpoint／journal formatは現在v5（hash導入時はv2）で、hashは保存receiptのメモリ上の情報。読込後は内容から再計算する。
 
 **hash一致を編集鮮度・再送・保存の判定へ置換しない。**
 同じ内容にUndoしてもrevision／receipt metadataが変わり得るため、`SaveReceipt::is_current`、
@@ -63,7 +63,7 @@ cargo clippy --offline --workspace --all-targets --all-features -- -D warnings
 npm test
 ```
 
-- 🟢 [Done] 意味内容hash v1、snapshot／保存receipt／worker明示query、正規化・保存／復旧テスト。
+- 🟢 [Done] 意味内容hash v2、snapshot／保存receipt／worker明示query、正規化・保存／復旧テスト。
 - 🟢 [Done] Tauri async／IPC認可・Rust Renderer接続（[仕様](native-renderer.md)）。
 - 🔴 [Later] 評価World分離と非同期評価結果guard、必要に応じた差分hash。
 - ⭕️ [Pending] 実UI・WASM／実GPU・他OS durability検証。

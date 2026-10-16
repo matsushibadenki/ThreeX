@@ -151,9 +151,8 @@ impl Scene {
                     if values.iter().any(|v| !v.is_finite()) {
                         return Err("Non-finite transform".into());
                     }
-                    if u(56) & !3 != 0 {
-                        return Err("Unknown flags".into());
-                    }
+                    o.geometry = crate::GeometryKind::from_flags(u(56))
+                        .ok_or("Unknown geometry or flags")?;
                     structural |= o.parent != u(60);
                     o.position.copy_from_slice(&values[..3]);
                     o.rotation.copy_from_slice(&values[3..6]);
@@ -419,7 +418,12 @@ impl Scene {
         let color = self.store.colors[slot];
         Instance {
             model: self.store.worlds[slot],
-            color: [color[0], color[1], color[2], 1.],
+            color: [
+                color[0],
+                color[1],
+                color[2],
+                1. + self.store.geometries[slot] as u8 as f32,
+            ],
         }
     }
     fn mark(
@@ -446,12 +450,7 @@ mod tests {
     use super::*;
     fn command(op: u32, id: u32, o: Object) -> [u8; 64] {
         let mut b = [0; 64];
-        for (at, v) in [
-            (0, op),
-            (4, id),
-            (56, u32::from(o.visible) | (u32::from(o.mesh) << 1)),
-            (60, o.parent),
-        ] {
+        for (at, v) in [(0, op), (4, id), (56, o.flags()), (60, o.parent)] {
             b[at..at + 4].copy_from_slice(&v.to_le_bytes());
         }
         let values = [o.position, o.rotation, o.scale, o.color].concat();

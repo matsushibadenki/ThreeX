@@ -1,7 +1,7 @@
 //! Write-ahead transaction log with an immutable, self-contained checkpoint anchor.
 use super::*;
 use std::io::{Seek, SeekFrom};
-const MAGIC: &[u8; 8] = b"THREEXJ4";
+const MAGIC: &[u8; 8] = b"THREEXJ5";
 const MAX_LOG: u64 = 256 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024 + 21;
 fn crc(b: &[u8]) -> u32 {
@@ -30,6 +30,12 @@ pub struct AutosaveDocument {
     valid_bytes: u64,
     pub discarded_bytes: u64,
     append_ready: bool,
+}
+impl Drop for AutosaveDocument {
+    fn drop(&mut self) {
+        // Release ownership explicitly even if a fork-before-exec temporarily holds a duplicated descriptor.
+        let _ = self._lock.unlock();
+    }
 }
 impl AutosaveDocument {
     pub fn open(store: DocumentStore) -> Result<Self, StorageError> {
@@ -70,7 +76,10 @@ impl AutosaveDocument {
         File::open(store.root.join("autosave.txj"))?
             .take(8)
             .read_to_end(&mut header)?;
-        let legacy = header == b"THREEXJ1" || header == b"THREEXJ2" || header == b"THREEXJ3";
+        let legacy = header == b"THREEXJ1"
+            || header == b"THREEXJ2"
+            || header == b"THREEXJ3"
+            || header == b"THREEXJ4";
         // Only a writer repairs the invalid suffix. Read-only recovery never modifies files.
         if valid_bytes == 0 {
             fs::copy(
@@ -522,15 +531,17 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
     let legacy = bytes.get(..8) == Some(b"THREEXJ1".as_slice());
     let v2 = bytes.get(..8) == Some(b"THREEXJ2".as_slice());
     let v3 = bytes.get(..8) == Some(b"THREEXJ3".as_slice());
+    let v4 = bytes.get(..8) == Some(b"THREEXJ4".as_slice());
     if bytes.get(..7) == Some(&MAGIC[..7])
         && bytes.get(..8) != Some(MAGIC.as_slice())
         && !legacy
         && !v2
         && !v3
+        && !v4
     {
         return Err(StorageError::UnsupportedJournalVersion);
     }
-    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 && !v3 {
+    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 && !v3 && !v4 {
         return fallback(store, bytes.len() as u64);
     }
     let Some((base, mut at)) = decode(&bytes, 8, MAX_BYTES as usize) else {
@@ -736,6 +747,117 @@ mod tests {
         owner
             .commit(owner.document().revision(), &command(id))
             .unwrap();
+    }
+    #[test]
+    fn dropping_owner_unlocks_even_when_a_duplicate_descriptor_survives() {
+        let t = Temp::new();
+        let owner = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let inherited = owner._lock.try_clone().unwrap();
+        drop(owner);
+        let next = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        drop(inherited);
+        assert!(matches!(
+            AutosaveDocument::open(DocumentStore::new(&t.0)),
+            Err(StorageError::Busy)
+        ));
+        drop(next);
+        AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+    }
+    #[test]
+    fn v4_box_migration_and_geometry_tail_recovery_preserve_replay_history() {
+        use threex_core::GeometryKind;
+        fn shaped(kind: GeometryKind, create: bool) -> Vec<u8> {
+            let mut data = if create {
+                command(1).to_vec()
+            } else {
+                Vec::new()
+            };
+            let mut update = [0u8; 64];
+            update[..4].copy_from_slice(&2u32.to_le_bytes());
+            update[4..8].copy_from_slice(&1u32.to_le_bytes());
+            for at in [32, 36, 40, 44, 48, 52] {
+                update[at..at + 4].copy_from_slice(&1f32.to_le_bytes());
+            }
+            update[56..60].copy_from_slice(&(3 | ((kind as u32) << 2)).to_le_bytes());
+            data.extend(update);
+            data
+        }
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let session = crate::new_session_id().unwrap();
+        let id = a.document().document_id().unwrap();
+        let request = |sequence, revision, kind, create| crate::ProtocolRequest {
+            protocol_version: 1,
+            document_id: id,
+            session_id: session,
+            sequence,
+            action: crate::ProtocolAction::Commit {
+                expected_revision: revision,
+                commands: shaped(kind, create),
+            },
+        };
+        let box_request = request(1, 0, GeometryKind::Box, true);
+        a.request(&box_request).unwrap();
+        let mut checkpoint = a.document().checkpoint().unwrap();
+        checkpoint[8..12].copy_from_slice(&4u32.to_le_bytes());
+        let n = checkpoint.len();
+        let sum = crc(&checkpoint[..n - 4]);
+        checkpoint[n - 4..].copy_from_slice(&sum.to_le_bytes());
+        drop(a);
+        let path = t.0.join("autosave.txj");
+        let mut legacy = b"THREEXJ4".to_vec();
+        legacy.extend(frame(&checkpoint));
+        fs::write(&path, legacy).unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ5");
+        assert!(a.request(&box_request).unwrap().replayed);
+        let plane = request(2, 1, GeometryKind::Plane, false);
+        a.request(&plane).unwrap();
+        let boundary = fs::metadata(&path).unwrap().len() as usize;
+        let sphere = request(3, 2, GeometryKind::Sphere, false);
+        a.request(&sphere).unwrap();
+        drop(a);
+        let complete = fs::read(&path).unwrap();
+        for cut in boundary..complete.len() {
+            fs::write(&path, &complete[..cut]).unwrap();
+            let loaded = DocumentStore::new(&t.0).load().unwrap();
+            assert_eq!(
+                loaded.document.scene().object(1).unwrap().geometry,
+                GeometryKind::Plane
+            );
+            assert_eq!(loaded.document.revision(), 2);
+        }
+        let mut corrupt = complete.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(&path, corrupt).unwrap();
+        assert_eq!(
+            DocumentStore::new(&t.0)
+                .load()
+                .unwrap()
+                .document
+                .scene()
+                .object(1)
+                .unwrap()
+                .geometry,
+            GeometryKind::Plane
+        );
+        fs::write(&path, complete).unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert!(a.request(&sphere).unwrap().replayed);
+        a.undo(3).unwrap();
+        assert_eq!(
+            a.document().scene().object(1).unwrap().geometry,
+            GeometryKind::Plane
+        );
+        a.redo(4).unwrap();
+        a.save().unwrap();
+        drop(a);
+        let a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert_eq!(
+            a.document().scene().object(1).unwrap().geometry,
+            GeometryKind::Sphere
+        );
+        assert_eq!(a.document().revision(), 5);
     }
     #[test]
     fn autosave_recovers_unsaved_edits_undo_redo_and_compacts() {
@@ -1150,7 +1272,7 @@ mod tests {
         );
         assert!(t.0.join("autosave.damaged").exists());
         let mut b = fs::read(&path).unwrap();
-        b[7] = b'5';
+        b[7] = b'6';
         fs::write(&path, b).unwrap();
         assert!(matches!(
             DocumentStore::new(&t.0).load(),

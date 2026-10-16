@@ -308,12 +308,7 @@ pub struct DocumentSnapshot {
 }
 pub(crate) fn record(op: u32, id: u32, o: Object) -> [u8; 64] {
     let mut b = [0; 64];
-    for (at, value) in [
-        (0, op),
-        (4, id),
-        (56, u32::from(o.visible) | (u32::from(o.mesh) << 1)),
-        (60, o.parent),
-    ] {
+    for (at, value) in [(0, op), (4, id), (56, o.flags()), (60, o.parent)] {
         b[at..at + 4].copy_from_slice(&value.to_le_bytes());
     }
     for (i, value) in o

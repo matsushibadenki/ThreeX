@@ -1,3 +1,4 @@
+import {cameraState, lookAt as cameraLookAt} from './camera.js';
 let nextId = 1;
 export class Vector3 {
  constructor(x=0,y=0,z=0,changed=()=>{}) {this._v=[x,y,z];this.changed=changed;}
@@ -18,25 +19,33 @@ export class Object3D {
 }
 export class Group extends Object3D {}
 export class Scene extends Object3D {constructor(){super();this._dirty=new Set();this._structure=0;}}
-export class BoxGeometry {constructor(width=1,height=1,depth=1){if([width,height,depth].some(x=>!Number.isFinite(x)||x<=0))throw Error('Invalid box dimensions');this.dimensions=[width,height,depth];}}
+function dimensions(values){if(values.some(x=>!Number.isFinite(x)||x<=0||!Number.isFinite(Math.fround(x))||Math.fround(x)===0))throw Error('Invalid geometry dimensions');return Object.freeze(values);}
+export class BoxGeometry {constructor(width=1,height=1,depth=1){this.dimensions=dimensions([width,height,depth]);Object.freeze(this);}get kind(){return 0;}}
+export class PlaneGeometry {constructor(width=1,height=1,widthSegments=1,heightSegments=1){if(widthSegments!==1||heightSegments!==1)throw Error('Plane supports 1 x 1 segments');this.dimensions=dimensions([width,height,1]);Object.freeze(this);}get kind(){return 1;}}
+export class SphereGeometry {constructor(radius=1,widthSegments=32,heightSegments=16){if(widthSegments!==32||heightSegments!==16)throw Error('Sphere supports 32 x 16 segments');this.dimensions=dimensions([radius,radius,radius]);Object.freeze(this);}get kind(){return 2;}}
+function validGeometry(g){return g instanceof BoxGeometry||g instanceof PlaneGeometry||g instanceof SphereGeometry;}
 export class MeshBasicMaterial {
  constructor({color=0xffffff}={}){this._listeners=new Set();this.color=color;}
  get color(){return this._color;}
  set color(value){if(!Number.isInteger(value)||value<0||value>0xffffff)throw Error('Invalid RGB color');if(value!==this._color){this._color=value;for(const listener of this._listeners)listener();}}
 }
 export class Mesh extends Object3D {
- constructor(geometry,material){super();if(!(geometry instanceof BoxGeometry))throw Error('MVP supports BoxGeometry');this.geometry=geometry;this._materialChanged=()=>this._mark();this.material=material;}
+ constructor(geometry,material){super();this.geometry=geometry;this._materialChanged=()=>this._mark();this.material=material;}
+ get geometry(){return this._geometry;}
+ set geometry(value){if(this._disposed)throw Error('Disposed mesh');if(!validGeometry(value))throw Error('Expected Box, Plane or Sphere geometry');if(this._geometry!==value){this._geometry=value;this._mark();}}
  get material(){return this._material;}
  set material(value){if(this._disposed)throw Error('Disposed mesh');if(!(value instanceof MeshBasicMaterial))throw Error('Expected MeshBasicMaterial');if(this._material===value)return;this._material?._listeners.delete(this._materialChanged);this._material=value;value._listeners.add(this._materialChanged);this._mark();}
  dispose(){this._material?._listeners.delete(this._materialChanged);super.dispose();}
 }
-export class PerspectiveCamera extends Object3D {constructor(fov=75,aspect=1,near=.1,far=1000){super();Object.assign(this,{fov,aspect,near,far});}updateProjectionMatrix(){} }
-function multiply(a,b){const out=new Float32Array(16);for(let j=0;j<4;j++)for(let i=0;i<4;i++)for(let k=0;k<4;k++)out[j*4+i]+=a[k*4+i]*b[j*4+k];return out;}
-function cameraMatrix(c){if(c.parent||c.rotation._v.some(v=>v!==0)||c.scale._v.some(v=>v!==1))throw Error('MVP camera supports translation only');if(!(c.aspect>0&&c.near>0&&c.far>c.near&&c.fov>0&&c.fov<180))throw Error('Invalid camera projection');const f=1/Math.tan(c.fov*Math.PI/360), n=c.near,far=c.far;return multiply([f/c.aspect,0,0,0,0,f,0,0,0,0,far/(n-far),-1,0,0,far*n/(n-far),0],[1,0,0,0,0,1,0,0,0,0,1,0,-c.position.x,-c.position.y,-c.position.z,1]);}
+export class PerspectiveCamera extends Object3D {
+ constructor(fov=75,aspect=1,near=.1,far=1000){super();Object.assign(this,{fov,aspect,near,far,zoom:1});this.up=new Vector3(0,1,0);this.updateProjectionMatrix();}
+ updateProjectionMatrix(){cameraState(this);return this;}
+ lookAt(x,y,z){return cameraLookAt(this,x,y,z);}
+}
 // One binary batch per render. IDs never recycle, preventing stale entity reuse.
 export class CommandBridge {
  constructor(){this.known=new Map();this.scene=null;this.structure=-1;}
- encode(scene){if(!(scene instanceof Scene)||scene._disposed)throw Error('Expected live Scene');const records=[];const write=(op,o)=>{const b=new ArrayBuffer(64),v=new DataView(b);v.setUint32(0,op,true);v.setUint32(4,o.id,true);if(op===2){const dimensions=o instanceof Mesh?o.geometry.dimensions:[1,1,1];const color=o instanceof Mesh?o.material.color:0xffffff;if(!Number.isInteger(color)||color<0||color>0xffffff)throw Error('Invalid RGB color');const values=[...o.position._v,...o.rotation._v,...o.scale._v.map((x,i)=>x*dimensions[i]),((color>>16)&255)/255,((color>>8)&255)/255,(color&255)/255];values.forEach((x,i)=>v.setFloat32(8+i*4,x,true));v.setUint32(56,(o.visible?1:0)|(o instanceof Mesh?2:0),true);v.setUint32(60,o.parent?.id??0,true);}records.push(new Uint8Array(b));};
+ encode(scene){if(!(scene instanceof Scene)||scene._disposed)throw Error('Expected live Scene');const records=[];const write=(op,o)=>{const b=new ArrayBuffer(64),v=new DataView(b);v.setUint32(0,op,true);v.setUint32(4,o.id,true);if(op===2){const dimensions=o instanceof Mesh?o.geometry.dimensions:[1,1,1];const color=o instanceof Mesh?o.material.color:0xffffff;if(!Number.isInteger(color)||color<0||color>0xffffff)throw Error('Invalid RGB color');const values=[...o.position._v,...o.rotation._v,...o.scale._v.map((x,i)=>x*dimensions[i]),((color>>16)&255)/255,((color>>8)&255)/255,(color&255)/255];values.forEach((x,i)=>v.setFloat32(8+i*4,x,true));v.setUint32(56,(o.visible?1:0)|(o instanceof Mesh?2|(o.geometry.kind<<2):0),true);v.setUint32(60,o.parent?.id??0,true);}records.push(new Uint8Array(b));};
  let active=this.known;const structural=this.scene!==scene||this.structure!==scene._structure;
  if(structural){active=new Map();const visit=o=>{active.set(o.id,o);for(const child of o.children)visit(child);};visit(scene);for(const [id,o]of this.known)if(!active.has(id))write(3,o);for(const [id,o]of active)if(!this.known.has(id))write(1,o);for(const o of active.values())write(2,o);}else{for(const o of scene._dirty)if(active.has(o.id))write(2,o);}
  const bytes=new Uint8Array(records.length*64);records.forEach((r,i)=>bytes.set(r,i*64));return {bytes,commit:()=>{this.known=active;this.scene=scene;this.structure=scene._structure;scene._dirty.clear();}};
@@ -46,6 +55,6 @@ export class WebGPURenderer {
  constructor({canvas}={}){this.domElement=canvas??document.createElement('canvas');this.bridge=new CommandBridge();this.runtime=null;}
  async init(){const wasm=await import('./wasm/threex_wasm.js');await wasm.default();this.runtime=await wasm.Runtime.create(this.domElement);return this;}
  setSize(width,height){if(!Number.isFinite(width)||!Number.isFinite(height)||width<1||height<1)throw Error('Invalid viewport');this.domElement.width=Math.floor(width);this.domElement.height=Math.floor(height);}
- render(scene,camera){if(!this.runtime)throw Error('Call await renderer.init() first');if(!(camera instanceof PerspectiveCamera))throw Error('Expected PerspectiveCamera');const vp=cameraMatrix(camera);const batch=this.bridge.encode(scene);this.runtime.render(batch.bytes,vp,this.domElement.width,this.domElement.height);batch.commit();}
+ render(scene,camera){if(!this.runtime)throw Error('Call await renderer.init() first');if(!(camera instanceof PerspectiveCamera))throw Error('Expected PerspectiveCamera');const state=cameraState(camera);const batch=this.bridge.encode(scene);this.runtime.render_camera(batch.bytes,state.nodes,state.projection,this.domElement.width,this.domElement.height);batch.commit();}
  dispose(){this.runtime?.free();this.runtime=null;this.bridge=new CommandBridge();}
 }
