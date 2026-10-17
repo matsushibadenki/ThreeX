@@ -1,9 +1,14 @@
 //! Write-ahead transaction log with an immutable, self-contained checkpoint anchor.
 use super::*;
 use std::io::{Seek, SeekFrom};
-const MAGIC: &[u8; 8] = b"THREEXJ5";
+const MAGIC: &[u8; 8] = b"THREEXJ6";
 const MAX_LOG: u64 = 256 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024 + 21;
+fn segment_flags(commands: &[u8]) -> bool {
+    commands.as_chunks::<64>().0.iter().any(|c| {
+        c[..4] == 2u32.to_le_bytes() && u32::from_le_bytes(c[56..60].try_into().unwrap()) & !15 != 0
+    })
+}
 fn crc(b: &[u8]) -> u32 {
     let mut c = !0u32;
     for &v in b {
@@ -79,7 +84,8 @@ impl AutosaveDocument {
         let legacy = header == b"THREEXJ1"
             || header == b"THREEXJ2"
             || header == b"THREEXJ3"
-            || header == b"THREEXJ4";
+            || header == b"THREEXJ4"
+            || header == b"THREEXJ5";
         // Only a writer repairs the invalid suffix. Read-only recovery never modifies files.
         if valid_bytes == 0 {
             fs::copy(
@@ -532,16 +538,18 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
     let v2 = bytes.get(..8) == Some(b"THREEXJ2".as_slice());
     let v3 = bytes.get(..8) == Some(b"THREEXJ3".as_slice());
     let v4 = bytes.get(..8) == Some(b"THREEXJ4".as_slice());
+    let v5 = bytes.get(..8) == Some(b"THREEXJ5".as_slice());
     if bytes.get(..7) == Some(&MAGIC[..7])
         && bytes.get(..8) != Some(MAGIC.as_slice())
         && !legacy
         && !v2
         && !v3
         && !v4
+        && !v5
     {
         return Err(StorageError::UnsupportedJournalVersion);
     }
-    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 && !v3 && !v4 {
+    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 && !v3 && !v4 && !v5 {
         return fallback(store, bytes.len() as u64);
     }
     let Some((base, mut at)) = decode(&bytes, 8, MAX_BYTES as usize) else {
@@ -628,6 +636,9 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
             if v2 && kind > 3 {
                 break;
             }
+            if (legacy || v2 || v3 || v4 || v5) && kind == 1 && segment_flags(&payload[58..]) {
+                break;
+            }
             let Ok(threex_core::RequestPreparation::Pending(prepared)) =
                 document.prepare_request(id, session, sequence, kind, expected, &payload[58..])
             else {
@@ -652,6 +663,9 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
             break;
         }
         // Document methods reject failures atomically, so replay needs no full Scene clone.
+        if (legacy || v2 || v3 || v4 || v5) && payload[0] == 1 && segment_flags(&payload[17..]) {
+            break;
+        }
         let result = match payload[0] {
             1 => document.commit(expected, &payload[17..]),
             2 if payload.len() == 17 => document.undo(expected),
@@ -764,6 +778,103 @@ mod tests {
         AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
     }
     #[test]
+    fn v5_migration_custom_segments_recovery_and_restart_replay() {
+        use threex_core::{GeometryKind, GeometrySpec};
+        let t = Temp::new();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        let id = a.document().document_id().unwrap();
+        let session = crate::new_session_id().unwrap();
+        let request = |sequence, revision, spec: GeometrySpec, create| {
+            let mut commands = if create {
+                command(1).to_vec()
+            } else {
+                Vec::new()
+            };
+            let mut c = [0u8; 64];
+            c[..4].copy_from_slice(&2u32.to_le_bytes());
+            c[4..8].copy_from_slice(&1u32.to_le_bytes());
+            for at in [32, 36, 40, 44, 48, 52] {
+                c[at..at + 4].copy_from_slice(&1f32.to_le_bytes());
+            }
+            c[56..60].copy_from_slice(&(spec.flags() | 3).to_le_bytes());
+            commands.extend(c);
+            crate::ProtocolRequest {
+                protocol_version: 1,
+                document_id: id,
+                session_id: session,
+                sequence,
+                action: crate::ProtocolAction::Commit {
+                    expected_revision: revision,
+                    commands,
+                },
+            }
+        };
+        let first = request(
+            1,
+            0,
+            GeometrySpec::new(GeometryKind::Plane, [0, 0]).unwrap(),
+            true,
+        );
+        a.request(&first).unwrap();
+        let mut old = a.document().checkpoint().unwrap();
+        drop(a);
+        old[8..12].copy_from_slice(&5u32.to_le_bytes());
+        let n = old.len() - 4;
+        let sum = crc(&old[..n]);
+        old[n..].copy_from_slice(&sum.to_le_bytes());
+        let path = t.0.join("autosave.txj");
+        let mut legacy = b"THREEXJ5".to_vec();
+        legacy.extend(frame(&old));
+        fs::write(&path, legacy).unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ6");
+        assert!(a.request(&first).unwrap().replayed);
+        let plane = request(
+            2,
+            1,
+            GeometrySpec::new(GeometryKind::Plane, [7, 9]).unwrap(),
+            false,
+        );
+        a.request(&plane).unwrap();
+        let boundary = fs::metadata(&path).unwrap().len() as usize;
+        let sphere = request(
+            3,
+            2,
+            GeometrySpec::new(GeometryKind::Sphere, [256, 256]).unwrap(),
+            false,
+        );
+        a.request(&sphere).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        drop(a);
+        for end in boundary..bytes.len() {
+            fs::write(&path, &bytes[..end]).unwrap();
+            let loaded = DocumentStore::new(&t.0).load().unwrap();
+            assert_eq!(loaded.document.revision(), 2);
+            assert_eq!(loaded.document.scene().object(1).unwrap().segments, [7, 9]);
+        }
+        let mut broken = bytes.clone();
+        *broken.last_mut().unwrap() ^= 1;
+        fs::write(&path, broken).unwrap();
+        assert_eq!(
+            DocumentStore::new(&t.0).load().unwrap().document.revision(),
+            2
+        );
+        fs::write(&path, bytes).unwrap();
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert!(a.request(&sphere).unwrap().replayed);
+        assert_eq!(a.document().revision(), 3);
+        a.undo(3).unwrap();
+        assert_eq!(a.document().scene().object(1).unwrap().segments, [7, 9]);
+        a.redo(4).unwrap();
+        assert_eq!(a.document().scene().object(1).unwrap().segments, [256, 256]);
+        a.save().unwrap();
+        drop(a);
+        let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
+        assert!(a.request(&sphere).unwrap().replayed);
+        assert_eq!(a.document().revision(), 5);
+        assert_eq!(a.document().scene().object(1).unwrap().segments, [256, 256]);
+    }
+    #[test]
     fn v4_box_migration_and_geometry_tail_recovery_preserve_replay_history() {
         use threex_core::GeometryKind;
         fn shaped(kind: GeometryKind, create: bool) -> Vec<u8> {
@@ -809,7 +920,7 @@ mod tests {
         legacy.extend(frame(&checkpoint));
         fs::write(&path, legacy).unwrap();
         let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
-        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ5");
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ6");
         assert!(a.request(&box_request).unwrap().replayed);
         let plane = request(2, 1, GeometryKind::Plane, false);
         a.request(&plane).unwrap();
@@ -1272,7 +1383,7 @@ mod tests {
         );
         assert!(t.0.join("autosave.damaged").exists());
         let mut b = fs::read(&path).unwrap();
-        b[7] = b'6';
+        b[7] = b'7';
         fs::write(&path, b).unwrap();
         assert!(matches!(
             DocumentStore::new(&t.0).load(),

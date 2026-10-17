@@ -11,7 +11,7 @@ pub enum CheckpointError {
     InvalidScene(String),
 }
 const MAGIC: &[u8; 8] = b"THREEXD\0";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 pub const MAX_CHECKPOINT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_HISTORY: usize = 8 * 1024 * 1024;
 const MAX_COMMAND: usize = 256 * 1024;
@@ -27,7 +27,7 @@ fn checksum(bytes: &[u8]) -> u32 {
     !crc
 }
 impl Document {
-    /// Version 5: geometry flags, durable outcomes, identity, session tombstones and bounded history.
+    /// Version 6: tessellation flags, durable outcomes, identity, session tombstones and bounded history.
     /// No GPU indices, renderer stamps or OS handles are persisted.
     pub fn checkpoint(&self) -> Result<Vec<u8>, CheckpointError> {
         if self.scene.len() > MAX_OBJECTS
@@ -123,7 +123,10 @@ impl Document {
             let id = u32::from_le_bytes(c[4..8].try_into().unwrap());
             if id <= last
                 || c[..4] != 2u32.to_le_bytes()
-                || (version < 5 && u32::from_le_bytes(c[56..60].try_into().unwrap()) & 12 != 0)
+                || (version < 6
+                    && u32::from_le_bytes(c[56..60].try_into().unwrap())
+                        & (if version < 5 { !3 } else { !15 })
+                        != 0)
             {
                 return Err(CheckpointError::Corrupt);
             }
@@ -155,11 +158,13 @@ impl Document {
                 forward: r.take(f)?.to_vec(),
                 inverse: r.take(inv)?.to_vec(),
             };
-            if version < 5
+            if version < 6
                 && [&edit.forward, &edit.inverse].iter().any(|commands| {
                     commands.as_chunks::<64>().0.iter().any(|c| {
                         c[..4] == 2u32.to_le_bytes()
-                            && u32::from_le_bytes(c[56..60].try_into().unwrap()) & 12 != 0
+                            && u32::from_le_bytes(c[56..60].try_into().unwrap())
+                                & if version < 5 { !3 } else { !15 }
+                                != 0
                     })
                 })
             {
@@ -450,10 +455,10 @@ mod tests {
             Err(CheckpointError::Corrupt)
         ));
         let mut b = bytes.clone();
-        b[8..12].copy_from_slice(&6u32.to_le_bytes());
+        b[8..12].copy_from_slice(&7u32.to_le_bytes());
         assert!(matches!(
             Document::from_checkpoint(&b),
-            Err(CheckpointError::UnsupportedVersion(6))
+            Err(CheckpointError::UnsupportedVersion(7))
         ));
         let mut b = bytes.clone();
         b[36..44].copy_from_slice(&u64::MAX.to_le_bytes());

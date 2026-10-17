@@ -1,4 +1,4 @@
-> 2026-10-16：現行はhash v2／保存形式v5。geometryを含む[変更仕様](../geometry.md)。
+> 2026-10-17：現行はhash v2／保存形式v6。flags u32に分割数も含む。既定内容のhash入力は変更しない。[仕様](../subdivisions.md)。
 
 # 意味内容hash v2
 
@@ -15,7 +15,8 @@ SHA-256への入力は以下の順序。数値はlittle endian。checkpointのby
 3. Object数（u64）。
 4. Object ID昇順に各60byte：ID（u32）、position／rotation／scale／colorの順の12個のf32、flags（u32）、parent ID（u32）。
 
-flagsはbit0＝visible、bit1＝mesh、bits2–3＝geometry（Box=0／Plane=1／Sphere=2）。他bitは0。
+flagsはbit0＝visible、bit1＝mesh、bits2–3＝geometry（Box=0／Plane=1／Sphere=2）。
+bits4–12／13–21はcustom分割数。既定値は両fieldを0へ正規化し、bits22–31は0。
 f32はIEEE754 bitsを使用し、+0／-0のみ同じ0bitへ正規化する。
 Documentは既存の編集検証で非有限数を拒否する。公開snapshotを外部で直接変更した場合、このAPIは再検証しない。
 角度の周期・異なる親子構造・同じ見た目の別Object IDを同一化しない。描画結果ではなく編集元の意味内容を識別する。
@@ -24,7 +25,8 @@ Documentは既存の編集検証で非有限数を拒否する。公開snapshot�
 Document ID・revision・Undo／Redo・履歴上限・request／session receipts・renderer／SoA slot順序を除く。
 同じ現在内容なら、別の作成順序・編集履歴・文書IDでも同じhashになる。
 Undoで以前の内容へ戻れば同じhashになり、Redoで再編集内容のhashへ戻る。
-仕様に含める属性やencodingが変わる場合はhash schema versionを更新する。
+canonical fieldやencodingが変わる場合はhash schema versionを更新する。
+今回は既存flags u32の有効値域を拡張し、field・正規化・既存内容の入力bytesは変更しない。
 
 ## 接続
 
@@ -34,7 +36,7 @@ Undoで以前の内容へ戻れば同じhashになり、Redoで再編集内容�
 
 workerの通常state／edit応答では毎回hashしない。計算はO(Object数)、追加の作業メモリは一定。
 明示queryと保存captureは全Objectを走査する。差分Merkle hashやhash cacheは今回導入していない。
-checkpoint／journal formatは現在v5（hash導入時はv2）で、hashは保存receiptのメモリ上の情報。読込後は内容から再計算する。
+checkpoint／journal formatは現在v6（hash導入時はv2）で、hashは保存receiptのメモリ上の情報。読込後は内容から再計算する。
 
 **hash一致を編集鮮度・再送・保存の判定へ置換しない。**
 同じ内容にUndoしてもrevision／receipt metadataが変わり得るため、`SaveReceipt::is_current`、

@@ -291,8 +291,75 @@ ThreeXはThree互換のXY中心Plane、radius=1のSphereを採用し、相手の
 ThreeXの既存Box vertex/index・64-byte wire・80-byte Instanceを保持し、形状のみのdirty更新を追加した。
 
 - 🟢 [Done] shared geometry、差分描画区間、保存形式v5・hash v2、旧形式移行・復旧・再送検証。
-- 🟠 [Next] 形状の交互配置でもdraw数を抑えるbatching。
+- 🟢 [Done] 形状の交互配置でも最大3 drawsへ抑えるbatching（2026-10-17）。
 - ⭕️ [Pending] 実GPU／browser表示・相手アプリとの文書交換。
 
 相手ソースは参照のみ。シンボリックリンクへのimport／include／Cargo path／実行時依存は追加していない。
 [仕様と検証境界](geometry.md)。
+
+## 形状別GPU batching
+
+2026-10-17。Universal-3Dの `Batch`／`GpuScene.batches` と形状別差分uploadを参照した。
+ThreeXも3形状bankを使うが、相手のCPU Instance cacheを流用せず、Sceneのdirty rangeと
+source slot逆引きからGPU内コピーを生成する。Document・Sceneの所有と保存／再送処理は維持する。
+
+- 🟢 [Done] 最大3 draws、追加／削除／形状変更の差分bank更新、CPU模擬コピー検証と前後比較。
+- 🟢 [Done] 対応limits内の交互配置の初回・全更新をcompute gatherへ集約。
+- ⭕️ [Pending] 実GPU／browser性能・表示検証。
+
+相手ソースは参照のみ。シンボリックリンクへのimport／include／Cargo path／実行時依存は追加していない。
+[性能比較と制約](batching-performance.md)。
+
+## 断片化したcopyのcompute gather
+
+2026-10-17。Universal-3Dの形状別bank、full uploadとdirty rangeの分岐を再確認した。
+ThreeXはRust側のInstance所有と既存差分経路を維持し、相手のCPU Instance複製を導入せず、
+大量の非連続copyだけをcompute gatherへ切り替える。相手の実装・保存形式を直接共有しない。
+
+- 🟢 [Done] 64 copy区間を超えるbankのgather、device／binding／dispatch limits検査とcopy fallback。
+- 🟢 [Done] 全更新／大量部分変更／少数編集のCPU byte検証・命令数とrelease前後比較。
+- 🟢 [Done] binding上限超過時の分割gather（partitioned-gather.md）。
+- ⭕️ [Pending] 実GPU readback・時間・電力・browser検証。Metal adapter NotFound。
+
+シンボリックリンクへのCargo path／import／include／実行時依存は追加していない。
+[仕様と性能比較](gather-performance.md)。
+
+## binding上限超過時の分割gather
+
+2026-10-17。Universal-3Dの形状bankとfull／dirty uploadの分岐を再確認した。
+ThreeXは相手のCPU Instance cacheを依存させず、Rust所有のInstanceと差分索引を維持する。
+大きなbufferをコピーして小さくする方式ではなく、同じGPU bufferのaligned windowをbindingする。
+
+- 🟢 [Done] source／destination window、task／workgroup分割、相対索引、索引の一括送信。
+- 🟢 [Done] 境界・raw byte・差分membership・分割不能fallback、前後CPU計画と命令数の比較。
+- ⭕️ [Pending] 実GPU readback・時間・電力・browser検証（Metal adapter NotFound）。
+
+シンボリックリンクへのCargo path／import／include／実行時依存は追加していない。
+[仕様と前後比較](partitioned-gather.md)。
+
+## 分割gatherの計画・索引再利用
+
+2026-10-17。Universal-3Dの形状bankとfull／dirty経路を再確認した。
+ThreeXはInstance snapshotを複製せず、source slotの構成revisionから全体gather計画を再利用する。
+相手ソースは参照のみで、cacheの形式・GPU索引はThreeXのRust Renderer内に閉じる。
+
+- 🟢 [Done] 構成・容量・limitsによる全体計画cache、少数copy後のGPU索引再利用。
+- 🟢 [Done] 部分gather後の索引再送、追加削除・形状変更の無効化、分割不能結果のcacheとcopy fallback。
+- ⭕️ [Pending] GPU索引送信を省いた実GPU readback・性能・WASM／browser（Metal adapter NotFound）。
+
+シンボリックリンクへのCargo path／import／include／実行時依存は追加していない。
+[再利用契約と性能比較](gather-cache.md)。
+
+## Plane／Sphereの任意分割
+
+2026-10-17。Universal-3Dのbuild_geometry、sphereの緯度／経度と形状bankを参照した。
+ThreeXは既存のXY Plane・unit radius=1 Sphere・外向きwindingを保持し、分割数をflagsで伝える。
+相手のXZ Plane／radius=.5 Sphereや保存形式を直接流用しない。
+
+- 🟢 [Done] bounded subdivisions、spec共有mesh、差分draw区間、u16／u32 index選択。
+- 🟢 [Done] 分割変更でgather構成revisionを維持し、計画・GPU索引を再利用。保存v6とv1–5読込／復旧。
+- 🟠 [Next] custom spec別batching・resource budget／generation handles。
+- ⭕️ [Pending] 実GPU・WASM／browser、相手アプリとの文書交換。
+
+シンボリックリンクへのimport／include／Cargo path／実行時依存は追加していない。
+[仕様と検証境界](subdivisions.md)。

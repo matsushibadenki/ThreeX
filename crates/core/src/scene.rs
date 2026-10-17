@@ -151,8 +151,14 @@ impl Scene {
                     if values.iter().any(|v| !v.is_finite()) {
                         return Err("Non-finite transform".into());
                     }
-                    o.geometry = crate::GeometryKind::from_flags(u(56))
+                    let spec = crate::GeometrySpec::from_flags(u(56))
                         .ok_or("Unknown geometry or flags")?;
+                    o.geometry = spec.kind;
+                    o.segments = if spec.flags() & !15 == 0 {
+                        [0, 0]
+                    } else {
+                        [spec.width, spec.height]
+                    };
                     structural |= o.parent != u(60);
                     o.position.copy_from_slice(&values[..3]);
                     o.rotation.copy_from_slice(&values[3..6]);
@@ -422,7 +428,7 @@ impl Scene {
                 color[0],
                 color[1],
                 color[2],
-                1. + self.store.geometries[slot] as u8 as f32,
+                self.store.object(slot).geometry_spec().tag() as f32,
             ],
         }
     }

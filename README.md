@@ -154,4 +154,4 @@ recovery and durable restart deduplication. [Benchmarks and limits](docs/four/pr
 
 Camera contracts, Rust computation and pending WASM verification: [docs/camera.md](docs/camera.md).
 
-[Primitive geometry, incremental mixed draws and v5 persistence](docs/geometry.md). Content hash schema is v2.
+[Primitive geometry, incremental mixed draws, subdivisions and v6 persistence](docs/geometry.md). Content hash schema is v2.

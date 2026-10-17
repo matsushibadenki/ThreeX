@@ -24,7 +24,13 @@
 - 🟢 [Done] Shared material RGB changes and material replacement mark affected meshes dirty.
 - 🟢 [Done] Perspective camera rotation／parent TRS／zoom／world lookAt、Rust view／projection math（camera.md）。
 - 🟢 [Done] Plane／Sphere geometry、共有GPU mesh・差分描画区間、Box wire／Instance互換（geometry.md）。
-- 🟠 [Next] geometry別batching、任意分割、camera view offset／film設定などの互換API。
+- 🟢 [Done] geometry別GPU batching、最大3 draws、dirty slotのGPU内コピー・差分membership（geometry.md）。
+- 🟢 [Done] 対応limits内の交互配置の初回／全更新をcompute gatherへ集約、少数差分copy・limits fallback維持（gather-performance.md）。
+- 🟢 [Done] binding上限超過時のaligned window・task／dispatch分割gather、差分copy・分割不能fallback（partitioned-gather.md）。
+- 🟢 [Done] 構成revisionに基づく分割gather計画・GPU索引再利用、部分gather後の再送・fallback維持（gather-cache.md）。
+- 🟢 [Done] Plane／Sphereの任意分割（上限256）、shared mesh・spec差分draw・Uint32 index、保存v6／v1–5移行（subdivisions.md）。
+- 🟠 [Next] custom分割spec別batching、camera view offset／film設定などの互換API。
+- ⭕️ [Pending] compute gatherの実GPU readback・性能・閾値調整。
 - 🟢 [Done] Release CPU scene benchmark at 100 / 1k / 10k / 100k objects, before/after CSV.
 - 🟠 [Next] GPU Scene / compute culling and four-way rendered 100k-cube comparison.
 - 🔴 [Later] Indirect draws, LOD, Hi-Z, Forward+, render graph, PBR.
@@ -40,10 +46,10 @@ and limitations are in soa-performance.md. GPU/power measurements remain pending
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust core: 52 passed; storage: 60 passed; renderer: 9 passed; Tauri host: 17 passed in debug and release. Tauri IPC / native scheduler: 17 passed. Renderer lifecycle: 5 passed; WGSL validation: 1 passed.
-- Current native suite: 138 passed in debug and release; JS: 12 passed.
-- JS compatibility tests: 12 passed.
-- Native GPU test: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
+- Rust core: 54 passed; storage: 61 passed; renderer: 20 passed; Tauri host: 17 passed in debug and release. Tauri IPC / native scheduler: 17 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
+- Current native suite: 152 passed in debug and release; JS: 13 passed.
+- JS compatibility tests: 13 passed.
+- Native GPU pipeline / gather readback tests: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.
 
 ## 関連プロジェクトとの協調
@@ -138,7 +144,7 @@ Group commit仕様・計測・制約：four/group-commit-performance.md。
 - ⭕️ [Pending] 新WASM camera bindingのtargetビルド・browser／GPU表示検証。
 仕様と制約：[camera.md](camera.md)。
 
-- 🟢 [Done] geometry flags、checkpoint／journal v5とv1–4移行、content hash v2。
+- 🟢 [Done] geometry・分割flags、checkpoint／journal v6とv1–5移行、content hash v2。
 - 🟢 [Done] Box・混在形状の差分描画計画、形状のみの更新・history・末尾復旧・再送、writer unlockの回帰検証。
 - ⭕️ [Pending] 3形状の実GPU／WASM表示。Metal adapter取得不可。
 仕様・制約：[geometry.md](geometry.md)。

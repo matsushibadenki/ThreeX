@@ -1,11 +1,48 @@
+pub mod batching;
+mod gather;
 pub mod geometry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
-use threex_core::{GeometryKind, Instance, Scene, SceneStamp};
+use threex_core::{GeometryKind, GeometrySpec, Instance, Scene, SceneStamp};
 struct MeshBuffers {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     count: u32,
+    format: wgpu::IndexFormat,
+}
+impl MeshBuffers {
+    fn new(device: &wgpu::Device, data: geometry::MeshData) -> Self {
+        let small = data.vertices.len() <= 65536;
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shared geometry"),
+            contents: bytemuck::cast_slice(&data.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = if small {
+            let values: Vec<u16> = data.indices.iter().map(|&i| i as u16).collect();
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shared indices"),
+                contents: bytemuck::cast_slice(&values),
+                usage: wgpu::BufferUsages::INDEX,
+            })
+        } else {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shared indices"),
+                contents: bytemuck::cast_slice(&data.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            })
+        };
+        Self {
+            vertices,
+            indices,
+            count: data.indices.len() as u32,
+            format: if small {
+                wgpu::IndexFormat::Uint16
+            } else {
+                wgpu::IndexFormat::Uint32
+            },
+        }
+    }
 }
 use wgpu::util::DeviceExt;
 pub struct Renderer {
@@ -13,7 +50,13 @@ pub struct Renderer {
     pub queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     geometries: [MeshBuffers; 3],
-    runs: geometry::GeometryRuns,
+    custom: std::collections::BTreeMap<GeometrySpec, MeshBuffers>,
+    batches: batching::GeometryBatches,
+    banks: [wgpu::Buffer; 3],
+    bank_capacities: [usize; 3],
+    banked: bool,
+    gather: Option<gather::Gather>,
+    gather_plans: gather::PlanCache,
     instances: wgpu::Buffer,
     camera: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -32,23 +75,8 @@ impl Renderer {
                 usage,
             })
         };
-        let geometries =
-            [GeometryKind::Box, GeometryKind::Plane, GeometryKind::Sphere].map(|kind| {
-                let data = geometry::unit_geometry(kind);
-                MeshBuffers {
-                    vertices: buffer(
-                        "shared geometry",
-                        bytemuck::cast_slice(&data.vertices),
-                        wgpu::BufferUsages::VERTEX,
-                    ),
-                    indices: buffer(
-                        "shared indices",
-                        bytemuck::cast_slice(&data.indices),
-                        wgpu::BufferUsages::INDEX,
-                    ),
-                    count: data.indices.len() as u32,
-                }
-            });
+        let geometries = [GeometryKind::Box, GeometryKind::Plane, GeometryKind::Sphere]
+            .map(|kind| MeshBuffers::new(&device, geometry::unit_geometry(kind)));
         let camera = buffer(
             "camera",
             bytemuck::cast_slice(&threex_core::identity()),
@@ -85,18 +113,41 @@ impl Renderer {
             push_constant_ranges: &[],
         });
         let pipeline=device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{label:None,layout:Some(&pl),vertex:wgpu::VertexState{module:&shader,entry_point:Some("vs"),compilation_options:Default::default(),buffers:&[wgpu::VertexBufferLayout{array_stride:12,step_mode:wgpu::VertexStepMode::Vertex,attributes:&wgpu::vertex_attr_array![0=>Float32x3]},wgpu::VertexBufferLayout{array_stride:80,step_mode:wgpu::VertexStepMode::Instance,attributes:&wgpu::vertex_attr_array![1=>Float32x4,2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4]}]},fragment:Some(wgpu::FragmentState{module:&shader,entry_point:Some("fs"),compilation_options:Default::default(),targets:&[Some(wgpu::ColorTargetState{format,blend:None,write_mask:wgpu::ColorWrites::ALL})]}),primitive:wgpu::PrimitiveState::default(),depth_stencil:Some(wgpu::DepthStencilState{format:wgpu::TextureFormat::Depth32Float,depth_write_enabled:true,depth_compare:wgpu::CompareFunction::Less,stencil:Default::default(),bias:Default::default()}),multisample:Default::default(),multiview:None,cache:None});
+        let gather = gather::Gather::new(&device);
+        let storage = if gather.is_some() {
+            wgpu::BufferUsages::STORAGE
+        } else {
+            wgpu::BufferUsages::empty()
+        };
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instances"),
             size: 80,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST
+                | storage,
             mapped_at_creation: false,
+        });
+        let banks = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("geometry instances"),
+                size: 80,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | storage,
+                mapped_at_creation: false,
+            })
         });
         Self {
             device,
             queue,
             pipeline,
             geometries,
-            runs: Default::default(),
+            custom: Default::default(),
+            batches: Default::default(),
+            banks,
+            bank_capacities: [1; 3],
+            banked: false,
+            gather,
+            gather_plans: Default::default(),
             instances,
             camera,
             bind,
@@ -118,6 +169,12 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
+        let storage = if self.gather.is_some() {
+            wgpu::BufferUsages::STORAGE
+        } else {
+            wgpu::BufferUsages::empty()
+        };
+        let mut encoder = self.device.create_command_encoder(&Default::default());
         if !scene.is_current(self.stamp.as_ref()) {
             let data = scene.instances();
             let reallocated = data.len() > self.capacity;
@@ -126,18 +183,92 @@ impl Renderer {
                 self.instances = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("instances"),
                     size: (self.capacity * std::mem::size_of::<Instance>()) as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST
+                        | storage,
                     mapped_at_creation: false,
                 });
             }
             let updates = scene.instance_updates_since(self.stamp.as_ref(), reallocated);
-            self.runs.sync(data, updates.ranges.clone());
+            self.batches.sync(data, updates.ranges.clone());
             for range in updates.ranges {
                 self.queue.write_buffer(
                     &self.instances,
                     (range.start * std::mem::size_of::<Instance>()) as u64,
                     bytemuck::cast_slice(&data[range]),
                 );
+            }
+            let banked = self.batches.requires_banks();
+            if banked {
+                for kind in 0..3 {
+                    let len = self.batches.indices(kind).len();
+                    let reallocated = len > self.bank_capacities[kind];
+                    let full = reallocated || !self.banked;
+                    if reallocated {
+                        self.bank_capacities[kind] = len.next_power_of_two();
+                        self.banks[kind] = self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("geometry instances"),
+                            size: (self.bank_capacities[kind] * 80) as u64,
+                            usage: wgpu::BufferUsages::VERTEX
+                                | wgpu::BufferUsages::COPY_DST
+                                | storage,
+                            mapped_at_creation: false,
+                        });
+                    }
+                    if let Some(gather) = &mut self.gather {
+                        match self.gather_plans.prepare(
+                            &self.device.limits(),
+                            [self.instances.size(), self.banks[kind].size()],
+                            &self.batches,
+                            kind,
+                            full,
+                        ) {
+                            gather::Prepared::Gather { plan, upload } => gather.encode(
+                                &self.device,
+                                &self.queue,
+                                &mut encoder,
+                                kind,
+                                [&self.instances, &self.banks[kind]],
+                                (plan, upload),
+                            ),
+                            gather::Prepared::Copies(copies) => {
+                                for copy in copies {
+                                    encoder.copy_buffer_to_buffer(
+                                        &self.instances,
+                                        (copy.source * 80) as u64,
+                                        &self.banks[kind],
+                                        (copy.destination * 80) as u64,
+                                        (copy.count * 80) as u64,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        for copy in self.batches.copies(kind, full) {
+                            encoder.copy_buffer_to_buffer(
+                                &self.instances,
+                                (copy.source * 80) as u64,
+                                &self.banks[kind],
+                                (copy.destination * 80) as u64,
+                                (copy.count * 80) as u64,
+                            );
+                        }
+                    }
+                }
+            }
+            self.banked = banked;
+            let active: std::collections::BTreeSet<_> = self
+                .batches
+                .geometry_draws()
+                .map(|(spec, _)| spec)
+                .filter(|s| s.flags() & !15 != 0)
+                .collect();
+            self.custom.retain(|spec, _| active.contains(spec));
+            for spec in active {
+                self.custom
+                    .entry(spec)
+                    .or_insert_with(|| MeshBuffers::new(&self.device, geometry::geometry(spec)));
             }
             self.count = data.len() as u32;
             self.stamp = Some(updates.stamp);
@@ -166,7 +297,6 @@ impl Renderer {
             .as_ref()
             .unwrap()
             .create_view(&Default::default());
-        let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("opaque"),
@@ -197,11 +327,23 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind, &[]);
-            pass.set_vertex_buffer(1, self.instances.slice(..));
-            for (kind, range) in self.runs.draws() {
-                let geometry = &self.geometries[kind as usize];
+            for (spec, range) in self.batches.geometry_draws() {
+                let kind = spec.kind;
+                pass.set_vertex_buffer(
+                    1,
+                    if self.banked {
+                        self.banks[kind as usize].slice(..)
+                    } else {
+                        self.instances.slice(..)
+                    },
+                );
+                let geometry = if spec.flags() & !15 == 0 {
+                    &self.geometries[kind as usize]
+                } else {
+                    &self.custom[&spec]
+                };
                 pass.set_vertex_buffer(0, geometry.vertices.slice(..));
-                pass.set_index_buffer(geometry.indices.slice(..), wgpu::IndexFormat::Uint16);
+                pass.set_index_buffer(geometry.indices.slice(..), geometry.format);
                 pass.draw_indexed(0..geometry.count, 0, range);
             }
         }
@@ -267,7 +409,12 @@ mod tests {
                 &vp,
             );
             assert_eq!(renderer.count, 1);
-            for (id, flags) in [(2u32, 7u32), (3, 11)] {
+            for (id, flags) in [
+                (2u32, 7u32),
+                (3, 11),
+                (4, 7 | (7 << 4) | (9 << 13)),
+                (5, 11 | (256 << 4) | (256 << 13)),
+            ] {
                 let mut extra = commands;
                 extra[4..8].copy_from_slice(&id.to_le_bytes());
                 extra[68..72].copy_from_slice(&id.to_le_bytes());
@@ -281,8 +428,15 @@ mod tests {
                 32,
                 &vp,
             );
-            assert_eq!(renderer.count, 3);
-            assert_eq!(renderer.runs.draws().count(), 3);
+            assert_eq!(renderer.count, 5);
+            assert_eq!(renderer.custom.len(), 2);
+            assert!(
+                renderer
+                    .custom
+                    .values()
+                    .any(|m| m.format == wgpu::IndexFormat::Uint32)
+            );
+            assert_eq!(renderer.batches.draws().count(), 3);
             assert!(renderer.device.pop_error_scope().await.is_none());
         });
     }

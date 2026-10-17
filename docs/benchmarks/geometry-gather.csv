@@ -1,0 +1,10 @@
+sample,workload_100000_interleaved,iterations,before_cpu_ms,after_cpu_ms,before_copies_per_iteration,after_copies_per_iteration,after_dispatches_per_iteration,extra_task_upload_bytes_per_iteration
+1,initial-plan,1,0.27375,0.208834,100000,0,3,800000
+1,full-update,100,46.8655,38.914625,100000,0,3,800000
+1,sparse-update,1000,0.041625,0.04175,1,1,0,0
+2,initial-plan,1,0.33991699999999997,0.220791,100000,0,3,800000
+2,full-update,100,51.594583,38.013709,100000,0,3,800000
+2,sparse-update,1000,0.0365,0.035332999999999996,1,1,0,0
+3,initial-plan,1,0.296334,0.21845900000000001,100000,0,3,800000
+3,full-update,100,44.3685,37.037416,100000,0,3,800000
+3,sparse-update,1000,0.042082999999999995,0.033583,1,1,0,0

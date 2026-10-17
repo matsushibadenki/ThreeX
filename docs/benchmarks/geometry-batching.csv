@@ -1,0 +1,7 @@
+sample,scene_100000,before_init_ms,after_init_ms,before_1000_updates_draw_traversal_ms,after_1000_updates_copy_plan_draw_traversal_ms,before_draw_count,after_draw_count,after_initial_gpu_copy_commands
+1,box,0.5455,5.518708,0.009958999999999999,0.007875,1,1,0
+1,interleaved,8.038416,3.81925,131.210959,0.041417,100000,3,100000
+2,box,0.108708,2.60525,0.005125,0.0045,1,1,0
+2,interleaved,4.934333,2.360084,126.409417,0.040833,100000,3,100000
+3,box,0.124167,2.570584,0.005167,0.0045,1,1,0
+3,interleaved,4.98775,2.545416,129.185583,0.04325,100000,3,100000

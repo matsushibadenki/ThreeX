@@ -1,11 +1,14 @@
 use std::{collections::BTreeMap, ops::Range};
-use threex_core::{GeometryKind, Instance};
+use threex_core::{GeometryKind, GeometrySpec, Instance};
 pub struct MeshData {
     pub vertices: Vec<[f32; 3]>,
-    pub indices: Vec<u16>,
+    pub indices: Vec<u32>,
 }
 pub fn unit_geometry(kind: GeometryKind) -> MeshData {
-    match kind {
+    geometry(GeometrySpec::new(kind, [0, 0]).unwrap())
+}
+pub fn geometry(spec: GeometrySpec) -> MeshData {
+    match spec.kind {
         GeometryKind::Box => MeshData {
             vertices: vec![
                 [-0.5, -0.5, -0.5],
@@ -22,7 +25,7 @@ pub fn unit_geometry(kind: GeometryKind) -> MeshData {
                 6, 5, 0, 4, 7, 0, 7, 3,
             ],
         },
-        GeometryKind::Plane => MeshData {
+        GeometryKind::Plane if spec.width == 1 && spec.height == 1 => MeshData {
             vertices: vec![
                 [-0.5, -0.5, 0.],
                 [0.5, -0.5, 0.],
@@ -31,8 +34,28 @@ pub fn unit_geometry(kind: GeometryKind) -> MeshData {
             ],
             indices: vec![0, 1, 2, 0, 2, 3],
         },
+        GeometryKind::Plane => {
+            let (w, h) = (u32::from(spec.width), u32::from(spec.height));
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            for y in 0..=h {
+                for x in 0..=w {
+                    vertices.push([x as f32 / w as f32 - 0.5, y as f32 / h as f32 - 0.5, 0.]);
+                }
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    let a = y * (w + 1) + x;
+                    let b = a + 1;
+                    let c = a + w + 1;
+                    let d = c + 1;
+                    indices.extend([a, b, d, a, d, c]);
+                }
+            }
+            MeshData { vertices, indices }
+        }
         GeometryKind::Sphere => {
-            let (w, h) = (32, 16);
+            let (w, h) = (u32::from(spec.width), u32::from(spec.height));
             let mut vertices = Vec::new();
             let mut indices = Vec::new();
             for y in 0..=h {
@@ -58,8 +81,8 @@ pub fn unit_geometry(kind: GeometryKind) -> MeshData {
             }
             for y in 0..h {
                 for x in 0..w {
-                    let a = (y * (w + 1) + x) as u16;
-                    let b = a + (w + 1) as u16;
+                    let a = y * (w + 1) + x;
+                    let b = a + w + 1;
                     let c = b + 1;
                     let d = a + 1;
                     if y > 0 {
@@ -219,6 +242,7 @@ mod tests {
         let mut scene = threex_core::Scene::default();
         let mut runs = GeometryRuns::default();
         let mut stamp = None;
+        let mut batches = crate::batching::GeometryBatches::default();
         for n in 0..240 {
             let id = 1 + n % 30;
             let mut o = scene.object(id).unwrap_or(threex_core::Object {
@@ -241,7 +265,20 @@ mod tests {
                     commands.extend(wire(3, id, o));
                     scene.apply(&commands).unwrap();
                     let updates = scene.instance_updates_since(stamp.as_ref(), false);
-                    runs.sync(scene.instances(), updates.ranges);
+                    runs.sync(scene.instances(), updates.ranges.clone());
+                    batches.sync(scene.instances(), updates.ranges);
+                    for kind in 0..3 {
+                        for &index in batches.indices(kind) {
+                            assert_eq!(
+                                scene.instances()[index as usize].geometry_kind() as usize,
+                                kind
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        (0..3).map(|k| batches.indices(k).len()).sum::<usize>(),
+                        scene.instances().len()
+                    );
                     stamp = Some(updates.stamp);
                     continue;
                 }
@@ -249,7 +286,20 @@ mod tests {
             commands.extend(wire(2, id, o));
             scene.apply(&commands).unwrap();
             let updates = scene.instance_updates_since(stamp.as_ref(), false);
-            runs.sync(scene.instances(), updates.ranges);
+            runs.sync(scene.instances(), updates.ranges.clone());
+            batches.sync(scene.instances(), updates.ranges);
+            for kind in 0..3 {
+                for &index in batches.indices(kind) {
+                    assert_eq!(
+                        scene.instances()[index as usize].geometry_kind() as usize,
+                        kind
+                    );
+                }
+            }
+            assert_eq!(
+                (0..3).map(|k| batches.indices(k).len()).sum::<usize>(),
+                scene.instances().len()
+            );
             stamp = Some(updates.stamp);
             let planned: Vec<_> = runs
                 .draws()
@@ -261,6 +311,45 @@ mod tests {
                 .map(Instance::geometry_kind)
                 .collect();
             assert_eq!(planned, reference);
+        }
+    }
+    #[test]
+    fn arbitrary_subdivision_topology_and_u32_indices_are_valid() {
+        for kind in [GeometryKind::Plane, GeometryKind::Sphere] {
+            for [w, h] in [[3, 2], [7, 9], [32, 16], [256, 256]] {
+                let spec = GeometrySpec::new(kind, [w, h]).unwrap();
+                let m = geometry(spec);
+                assert_eq!(m.vertices.len(), (w as usize + 1) * (h as usize + 1));
+                let triangles = if kind == GeometryKind::Plane {
+                    2 * w as usize * h as usize
+                } else {
+                    2 * w as usize * (h as usize - 1)
+                };
+                assert_eq!(m.indices.len(), triangles * 3);
+                for tri in m.indices.as_chunks::<3>().0 {
+                    let [a, b, c] = tri.map(|i| m.vertices[i as usize]);
+                    let u = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
+                    let v = std::array::from_fn::<_, 3, _>(|i| c[i] - a[i]);
+                    let cross = [
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    ];
+                    if kind == GeometryKind::Plane {
+                        assert!(cross[2] > 0.);
+                    } else {
+                        assert!((0..3).map(|i| cross[i] * (a[i] + b[i] + c[i])).sum::<f32>() > 0.);
+                    }
+                }
+                if w == 256 {
+                    assert!(m.indices.iter().any(|&i| i > u16::MAX as u32));
+                }
+                if kind == GeometryKind::Sphere {
+                    for p in m.vertices {
+                        assert!((p.iter().map(|v| v * v).sum::<f32>() - 1.).abs() < 1e-5);
+                    }
+                }
+            }
         }
     }
 }

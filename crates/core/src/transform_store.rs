@@ -14,6 +14,7 @@ pub(crate) struct TransformStore {
     pub visible: Vec<bool>,
     pub meshes: Vec<bool>,
     pub geometries: Vec<crate::GeometryKind>,
+    pub segments: Vec<[u16; 2]>,
     pub locals: Vec<[[f32; 4]; 4]>,
     pub worlds: Vec<[[f32; 4]; 4]>,
     pub world_visible: Vec<bool>,
@@ -38,6 +39,7 @@ impl TransformStore {
             visible,
             meshes,
             geometries,
+            segments,
             locals,
             worlds,
             world_visible,
@@ -67,6 +69,7 @@ impl TransformStore {
         self.visible.push(true);
         self.meshes.push(false);
         self.geometries.push(crate::GeometryKind::Box);
+        self.segments.push([0, 0]);
         self.locals.push(identity());
         self.worlds.push(identity());
         self.world_visible.push(true);
@@ -92,6 +95,7 @@ impl TransformStore {
             visible: self.visible[slot],
             mesh: self.meshes[slot],
             geometry: self.geometries[slot],
+            segments: self.segments[slot],
         }
     }
     pub fn write(&mut self, slot: usize, o: Object) {
@@ -103,5 +107,6 @@ impl TransformStore {
         self.visible[slot] = o.visible;
         self.meshes[slot] = o.mesh;
         self.geometries[slot] = o.geometry;
+        self.segments[slot] = o.segments;
     }
 }
