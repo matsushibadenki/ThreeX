@@ -1,4 +1,9 @@
 //! Retained scene database. Commands are little-endian fixed 64-byte records.
+pub mod asset_pages;
+mod assets;
+pub mod visibility;
+pub use assets::{AssetJobGuard, AssetRef, asset_command};
+pub use request::AssetId;
 mod geometry;
 pub use geometry::{GeometryKind, GeometrySpec};
 mod camera;
@@ -38,6 +43,7 @@ pub struct Object {
     pub mesh: bool,
     pub geometry: GeometryKind,
     pub segments: [u16; 2],
+    pub asset: Option<AssetRef>,
 }
 impl Default for Object {
     fn default() -> Self {
@@ -51,6 +57,7 @@ impl Default for Object {
             mesh: false,
             geometry: GeometryKind::Box,
             segments: [0, 0],
+            asset: None,
         }
     }
 }

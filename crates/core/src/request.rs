@@ -42,6 +42,7 @@ macro_rules! identifier {
 }
 identifier!(DocumentId);
 identifier!(SessionId);
+identifier!(AssetId);
 #[derive(Debug, PartialEq, Eq)]
 pub enum RequestError {
     DocumentMismatch,

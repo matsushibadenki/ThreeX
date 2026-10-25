@@ -1,5 +1,6 @@
 //! Native targets remain in Rust. The worker borrows its authoritative Scene only for a frame.
 use crate::Renderer;
+use crate::asset_pages::{PageAdmission, PageFailure};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -7,7 +8,10 @@ use std::{
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
-use threex_core::Scene;
+use threex_core::{
+    Document, Scene,
+    asset_pages::{AssetManifest, ValidatedPage},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurfaceHandle {
@@ -62,8 +66,26 @@ pub enum AcquireFailure {
     OutOfMemory,
     Other,
 }
+/// Small outcome after guarded page upload or fallback selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssetDelivery {
+    pub changed: bool,
+    pub ready: bool,
+    pub failure: Option<PageFailure>,
+}
 /// A backend owns the surface and renderer, never a Document or Scene clone.
 pub trait SurfaceBackend: Send {
+    fn upload_asset(
+        &mut self,
+        _document: &Document,
+        _entity: u32,
+        _manifest: AssetManifest,
+        _level: u8,
+        _page: Result<ValidatedPage, PageFailure>,
+    ) -> Result<AssetDelivery, SurfaceFailure> {
+        Err(SurfaceFailure::Unavailable)
+    }
+
     fn configure(&mut self, width: u32, height: u32) -> Result<(), SurfaceFailure>;
     fn draw(&mut self, scene: &Scene, camera: &[f32; 16]) -> Result<(), AcquireFailure>;
 }
@@ -81,9 +103,54 @@ struct Targets {
 }
 /// Shared control registry; only the worker's ordered render command receives a Scene reference.
 type SceneWake = Arc<dyn Fn() + Send + Sync>;
+type AssetWake = Arc<dyn Fn(SurfaceHandle) + Send + Sync>;
 #[derive(Clone, Default)]
-pub struct NativeSurfaces(Arc<Mutex<Targets>>, Arc<Mutex<Option<SceneWake>>>);
+pub struct NativeSurfaces(
+    Arc<Mutex<Targets>>,
+    Arc<Mutex<Option<SceneWake>>>,
+    Arc<Mutex<Option<AssetWake>>>,
+);
 impl NativeSurfaces {
+    pub fn set_asset_waker(&self, wake: AssetWake) {
+        if let Ok(mut signal) = self.2.lock() {
+            *signal = Some(wake);
+        }
+    }
+    pub fn asset_changed(&self, handle: SurfaceHandle) {
+        let wake = self.2.lock().ok().and_then(|s| s.clone());
+        if let Some(wake) = wake {
+            wake(handle);
+        } else {
+            self.scene_changed();
+        }
+    }
+    pub fn upload_asset(
+        &self,
+        document: &Document,
+        handle: SurfaceHandle,
+        entity: u32,
+        manifest: AssetManifest,
+        level: u8,
+        page: Result<ValidatedPage, PageFailure>,
+    ) -> Result<AssetDelivery, SurfaceFailure> {
+        let mut targets = self.0.lock().map_err(|_| SurfaceFailure::Poisoned)?;
+        let target = targets
+            .entries
+            .get_mut(&handle.id)
+            .filter(|t| t.generation == handle.generation)
+            .ok_or(SurfaceFailure::Stale)?;
+        if let Some(failure) = target.failed {
+            return Err(failure);
+        }
+        let result = target
+            .backend
+            .upload_asset(document, entity, manifest, level, page);
+        if let Err(error @ (SurfaceFailure::DeviceLost | SurfaceFailure::OutOfMemory)) = result {
+            target.failed = Some(error);
+        }
+        result
+    }
+
     pub fn size(&self, handle: SurfaceHandle) -> Result<(u32, u32), SurfaceFailure> {
         let targets = self.0.lock().map_err(|_| SurfaceFailure::Poisoned)?;
         targets
@@ -325,6 +392,46 @@ impl WgpuSurface {
     }
 }
 impl SurfaceBackend for WgpuSurface {
+    fn upload_asset(
+        &mut self,
+        document: &Document,
+        entity: u32,
+        manifest: AssetManifest,
+        level: u8,
+        page: Result<ValidatedPage, PageFailure>,
+    ) -> Result<AssetDelivery, SurfaceFailure> {
+        if self.lost.load(Ordering::Acquire) {
+            return Err(SurfaceFailure::DeviceLost);
+        }
+        match self.fault.load(Ordering::Acquire) {
+            0 => (),
+            1 => return Err(SurfaceFailure::OutOfMemory),
+            _ => return Err(SurfaceFailure::Unavailable),
+        }
+        let reference = manifest.reference();
+        let before = self.renderer.asset_manifests.contains_key(&reference);
+        let mut uploaded = false;
+        let result = match self
+            .renderer
+            .request_asset_page(document, entity, manifest, level)
+        {
+            Ok(PageAdmission::Resident(_)) => Ok(()),
+            Ok(PageAdmission::Load(request)) => self
+                .renderer
+                .complete_asset_page(document, request, page)
+                .map(|_| {
+                    uploaded = true;
+                }),
+            Err(e) => Err(e),
+        };
+        let registered = self.renderer.asset_manifests.contains_key(&reference);
+        Ok(AssetDelivery {
+            changed: uploaded || (!before && registered),
+            ready: result.is_ok(),
+            failure: result.err(),
+        })
+    }
+
     fn configure(&mut self, width: u32, height: u32) -> Result<(), SurfaceFailure> {
         if self.lost.load(Ordering::Acquire) {
             return Err(SurfaceFailure::DeviceLost);

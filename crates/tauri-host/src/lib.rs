@@ -236,6 +236,8 @@ impl IpcHost {
         let pending = Arc::new(tokio::sync::Semaphore::new(64));
         let scheduler = redraw::Scheduler::start(ingress.clone(), client.clone(), pending.clone())
             .map_err(HostOpenError::Scheduler)?;
+        let asset_wake = scheduler.handle();
+        surfaces.set_asset_waker(Arc::new(move |handle| asset_wake.invalidate_target(handle)));
         let wake = scheduler.handle();
         surfaces.set_scene_waker(Arc::new(move || wake.invalidate_all()));
         Ok(Self {
@@ -1006,6 +1008,7 @@ mod tests {
         drops: usize,
         sizes: Vec<(u32, u32)>,
         lose: bool,
+        asset_uploads: Vec<String>,
     }
     struct TestSurface(Arc<Mutex<RenderLog>>);
     impl Drop for TestSurface {
@@ -1014,6 +1017,34 @@ mod tests {
         }
     }
     impl threex_renderer::native::SurfaceBackend for TestSurface {
+        fn upload_asset(
+            &mut self,
+            document: &threex_core::Document,
+            entity: u32,
+            manifest: threex_core::asset_pages::AssetManifest,
+            _level: u8,
+            page: Result<
+                threex_core::asset_pages::ValidatedPage,
+                threex_renderer::asset_pages::PageFailure,
+            >,
+        ) -> Result<threex_renderer::native::AssetDelivery, threex_renderer::native::SurfaceFailure>
+        {
+            assert_eq!(
+                document.scene().object(entity).unwrap().asset,
+                Some(manifest.reference())
+            );
+            self.0
+                .lock()
+                .unwrap()
+                .asset_uploads
+                .push(std::thread::current().name().unwrap().to_owned());
+            Ok(threex_renderer::native::AssetDelivery {
+                changed: page.is_ok(),
+                ready: page.is_ok(),
+                failure: page.err(),
+            })
+        }
+
         fn configure(
             &mut self,
             w: u32,
@@ -1592,6 +1623,107 @@ mod tests {
             .unwrap();
         assert!(redraw.wait_idle());
         assert_eq!(log.lock().unwrap().frames.last().unwrap().1, 0);
+        shutdown(&a);
+    }
+    #[test]
+    fn trusted_asset_load_drives_only_its_target_redraw_without_document_edit() {
+        use threex_core::{
+            AssetId, asset_command,
+            asset_pages::{
+                AssetManifest, DESCRIPTOR_BYTES, HEADER_BYTES, PageDescriptor, page_hash,
+            },
+        };
+        let t = Temp::new();
+        let a = app(&t);
+        let w = view(&a, "main");
+        let h = hello(&w);
+        let mut page = Vec::new();
+        for v in [[0f32, 0., 0.], [1., 0., 0.], [0., 1., 0.]] {
+            for x in v {
+                page.extend(x.to_le_bytes());
+            }
+        }
+        for i in [0u32, 1, 2] {
+            page.extend(i.to_le_bytes());
+        }
+        let offset = (HEADER_BYTES + DESCRIPTOR_BYTES) as u64;
+        let p = PageDescriptor {
+            offset,
+            length: page.len() as u64,
+            vertices: 3,
+            indices: 3,
+            error: 0.,
+            hash: page_hash(&page),
+        };
+        let (reference, mut bytes) = AssetManifest::encode(
+            AssetId::from_bytes([4; 16]).unwrap(),
+            1,
+            [0., 0., 0., 1., 1., 0.],
+            offset + p.length,
+            &[p],
+        )
+        .unwrap();
+        bytes.extend(page);
+        let path = t.0.join("asset.bin");
+        fs::write(&path, bytes).unwrap();
+        let mut edit = edit(&h, "1", "0", 1);
+        let commands = [command(1), asset_command(1, Some(reference)).to_vec()].concat();
+        edit["action"]["commands"] = json!(commands);
+        ipc(&w, edit).unwrap();
+        let host = a.state::<IpcHost>();
+        let main_log = Arc::new(Mutex::new(RenderLog::default()));
+        let panel_log = Arc::new(Mutex::new(RenderLog::default()));
+        let main = host
+            .attach_surface("main", 1, Box::new(TestSurface(main_log.clone())), 64, 64)
+            .unwrap();
+        let panel = host
+            .attach_surface("panel", 2, Box::new(TestSurface(panel_log.clone())), 64, 64)
+            .unwrap();
+        let main_redraw = host.schedule_surface("main", main, 64, 64).unwrap();
+        let panel_redraw = host.schedule_surface("panel", panel, 64, 64).unwrap();
+        assert!(main_redraw.wait_idle());
+        assert!(panel_redraw.wait_idle());
+        let before = main_log.lock().unwrap().frames.len();
+        let other = panel_log.lock().unwrap().frames.len();
+        assert_eq!(
+            tauri::async_runtime::block_on(host.load_asset("panel", main, 1, path.clone(), false))
+                .unwrap_err()
+                .code,
+            "surface_stale"
+        );
+        assert_eq!(
+            tauri::async_runtime::block_on(host.load_asset(
+                "unknown",
+                main,
+                1,
+                path.clone(),
+                false
+            ))
+            .unwrap_err()
+            .code,
+            "forbidden"
+        );
+        assert_eq!(
+            tauri::async_runtime::block_on(host.load_asset("main", main, 1, path, false)).unwrap(),
+            threex_storage::AssetLoadStatus::Queued
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while main_log.lock().unwrap().frames.len() == before {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(main_redraw.wait_idle());
+        assert_eq!(
+            main_log.lock().unwrap().asset_uploads,
+            vec!["threex-document"]
+        );
+        assert_eq!(panel_log.lock().unwrap().frames.len(), other);
+        let current = inspect(&w, &h);
+        assert_eq!(current["state"]["revision"], "1");
+        assert_eq!(current["state"]["successful_sync_groups"], "1");
+        let frames = main_log.lock().unwrap().frames.len();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(main_log.lock().unwrap().frames.len(), frames);
         shutdown(&a);
     }
 }

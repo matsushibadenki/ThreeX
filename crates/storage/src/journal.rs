@@ -1,13 +1,20 @@
 //! Write-ahead transaction log with an immutable, self-contained checkpoint anchor.
 use super::*;
 use std::io::{Seek, SeekFrom};
-const MAGIC: &[u8; 8] = b"THREEXJ6";
+const MAGIC: &[u8; 8] = b"THREEXJ7";
 const MAX_LOG: u64 = 256 * 1024 * 1024;
 const MAX_RECORD: usize = 256 * 1024 + 21;
 fn segment_flags(commands: &[u8]) -> bool {
     commands.as_chunks::<64>().0.iter().any(|c| {
         c[..4] == 2u32.to_le_bytes() && u32::from_le_bytes(c[56..60].try_into().unwrap()) & !15 != 0
     })
+}
+fn asset_commands(bytes: &[u8]) -> bool {
+    bytes
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .any(|c| matches!(u32::from_le_bytes(c[..4].try_into().unwrap()), 4 | 5))
 }
 fn crc(b: &[u8]) -> u32 {
     let mut c = !0u32;
@@ -85,7 +92,8 @@ impl AutosaveDocument {
             || header == b"THREEXJ2"
             || header == b"THREEXJ3"
             || header == b"THREEXJ4"
-            || header == b"THREEXJ5";
+            || header == b"THREEXJ5"
+            || header == b"THREEXJ6";
         // Only a writer repairs the invalid suffix. Read-only recovery never modifies files.
         if valid_bytes == 0 {
             fs::copy(
@@ -539,6 +547,7 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
     let v3 = bytes.get(..8) == Some(b"THREEXJ3".as_slice());
     let v4 = bytes.get(..8) == Some(b"THREEXJ4".as_slice());
     let v5 = bytes.get(..8) == Some(b"THREEXJ5".as_slice());
+    let v6 = bytes.get(..8) == Some(b"THREEXJ6".as_slice());
     if bytes.get(..7) == Some(&MAGIC[..7])
         && bytes.get(..8) != Some(MAGIC.as_slice())
         && !legacy
@@ -546,10 +555,11 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
         && !v3
         && !v4
         && !v5
+        && !v6
     {
         return Err(StorageError::UnsupportedJournalVersion);
     }
-    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 && !v3 && !v4 && !v5 {
+    if bytes.get(..8) != Some(MAGIC.as_slice()) && !legacy && !v2 && !v3 && !v4 && !v5 && !v6 {
         return fallback(store, bytes.len() as u64);
     }
     let Some((base, mut at)) = decode(&bytes, 8, MAX_BYTES as usize) else {
@@ -562,6 +572,11 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
         }
         Err(_) => return fallback(store, bytes.len() as u64),
     };
+    if (legacy || v2 || v3 || v4 || v5 || v6)
+        && document.scene().objects().any(|(_, o)| o.asset.is_some())
+    {
+        return Err(StorageError::UnsupportedJournalVersion);
+    }
     if let Some(id) = store.read_identity()? {
         document
             .bind_document_id(id)
@@ -639,6 +654,10 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
             if (legacy || v2 || v3 || v4 || v5) && kind == 1 && segment_flags(&payload[58..]) {
                 break;
             }
+            if (legacy || v2 || v3 || v4 || v5 || v6) && kind == 1 && asset_commands(&payload[58..])
+            {
+                break;
+            }
             let Ok(threex_core::RequestPreparation::Pending(prepared)) =
                 document.prepare_request(id, session, sequence, kind, expected, &payload[58..])
             else {
@@ -664,6 +683,12 @@ fn read_log(store: &DocumentStore) -> Result<(LoadedDocument, u64), StorageError
         }
         // Document methods reject failures atomically, so replay needs no full Scene clone.
         if (legacy || v2 || v3 || v4 || v5) && payload[0] == 1 && segment_flags(&payload[17..]) {
+            break;
+        }
+        if (legacy || v2 || v3 || v4 || v5 || v6)
+            && payload[0] == 1
+            && asset_commands(&payload[17..])
+        {
             break;
         }
         let result = match payload[0] {
@@ -827,7 +852,7 @@ mod tests {
         legacy.extend(frame(&old));
         fs::write(&path, legacy).unwrap();
         let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
-        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ6");
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ7");
         assert!(a.request(&first).unwrap().replayed);
         let plane = request(
             2,
@@ -920,7 +945,7 @@ mod tests {
         legacy.extend(frame(&checkpoint));
         fs::write(&path, legacy).unwrap();
         let mut a = AutosaveDocument::open(DocumentStore::new(&t.0)).unwrap();
-        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ6");
+        assert_eq!(&fs::read(&path).unwrap()[..8], b"THREEXJ7");
         assert!(a.request(&box_request).unwrap().replayed);
         let plane = request(2, 1, GeometryKind::Plane, false);
         a.request(&plane).unwrap();
@@ -1383,7 +1408,7 @@ mod tests {
         );
         assert!(t.0.join("autosave.damaged").exists());
         let mut b = fs::read(&path).unwrap();
-        b[7] = b'7';
+        b[7] = b'8';
         fs::write(&path, b).unwrap();
         assert!(matches!(
             DocumentStore::new(&t.0).load(),

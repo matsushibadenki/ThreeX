@@ -103,6 +103,21 @@ pub struct RedrawHandle {
 #[derive(Clone)]
 pub(crate) struct Wake(Weak<Shared>);
 impl Wake {
+    pub fn invalidate_target(&self, handle: SurfaceHandle) {
+        if let Some(shared) = self.0.upgrade()
+            && let Ok(mut state) = shared.state.lock()
+            && !state.stopped
+        {
+            for view in state
+                .views
+                .values_mut()
+                .filter(|v| v.handle == handle && !v.closing)
+            {
+                view.invalidate();
+            }
+            shared.wake.notify_all();
+        }
+    }
     pub fn invalidate_all(&self) {
         if let Some(shared) = self.0.upgrade()
             && let Ok(mut state) = shared.state.lock()

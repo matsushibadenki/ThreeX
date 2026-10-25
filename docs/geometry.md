@@ -1,5 +1,7 @@
 # Box／Plane／Sphere geometry
 
+> 現行の保存形式はv7／hash v3。以下のv6／hash v2の記録は分割導入時点の仕様。[asset参照・移行](assets.md)。
+
 2026-10-17。🟢 [Done] 共有geometry・Plane／Sphereの任意分割・差分描画・永続化と復旧。
 詳しいwire契約・移行とテストは [subdivisions.md](subdivisions.md) を参照。
 
@@ -39,9 +41,12 @@ Rust Rendererは3種類の既定meshと、参照中のcustom分割meshを共有�
 Instanceの転送は既存の3形状bankを維持する。dirty slotに対応する分割spec区間だけを更新する。
 同じkind内の分割変更ではbankのsource／destination対応を変えず、gather計画・GPU索引を再利用する。
 単一specは元bufferから直接描画する。単一kindでも複数specがある場合はbank順序で描画する。
-既定の3形状だけなら最大3 drawsを維持し、custom specが混在する場合は連続spec区間ごとにdrawする。
+既定の3形状だけなら最大3 drawsを維持し、custom specが混在する場合もspecごとに索引をまとめ、active spec数だけdrawする。
 
-🟠 [Next] custom spec別batching。交互spec配置はInstance数までdraw区間が増え得る。
+🟢 [Done] custom spec別batching（[性能・制限](spec-batching.md)）。
+🟢 [Done] 構成変更時の局所再配置（[比較・検証](local-spec-packing.md)）。
+🟢 [Done] custom mesh resource budget（[契約と検証](mesh-budget.md)）。
+🟠 [Next] generation resource handles。
 active spec数に応じてGPU meshメモリも増える。resource budget／generation handlesも別の未完了項目。
 
 分割gather・fallback・cacheの仕様は [partitioned-gather.md](partitioned-gather.md)、
@@ -72,7 +77,7 @@ Rust 152件（core 54、renderer 20、storage 61、Tauri host 17）とJS 13件�
 
 English: Plane and Sphere support bounded integer subdivisions, shared meshes, incremental spec runs and
 Uint16/Uint32 indexed draws. Default wire/tag/hash values remain compatible; storage v6 reads v1–5.
-Custom interleaved specs can increase draw counts. GPU presentation remains pending.
+Interleaved instances are grouped into one draw per active spec. GPU presentation remains pending.
 
 简体中文：Plane与Sphere支持范围内的整数分段、共享mesh和差分绘制区间，按需使用Uint16／Uint32索引。
-保留默认命令、tag和hash，保存格式v6可读取v1–5。交错的自定义spec可能增加draw数，实际GPU显示验证待完成。
+保留默认命令、tag和hash，保存格式v6可读取v1–5。交错实例按spec分组，每个活跃spec只需一次draw，实际GPU显示验证待完成。

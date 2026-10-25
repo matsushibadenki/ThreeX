@@ -15,6 +15,7 @@ pub struct GeometryBatches {
     revisions: [u64; 3],
     specs: [Vec<GeometrySpec>; 3],
     starts: [BTreeMap<usize, GeometrySpec>; 3],
+    groups: [BTreeMap<GeometrySpec, Range<usize>>; 3],
 }
 /// Consecutive source and destination slots can share one GPU buffer copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,15 +30,6 @@ pub enum TransferPlan {
     Gather(Vec<[u32; 2]>),
 }
 impl GeometryBatches {
-    fn boundary(&mut self, kind: usize, at: usize) {
-        if at < self.specs[kind].len()
-            && (at == 0 || self.specs[kind][at - 1] != self.specs[kind][at])
-        {
-            self.starts[kind].insert(at, self.specs[kind][at]);
-        } else {
-            self.starts[kind].remove(&at);
-        }
-    }
     pub fn geometry_draws(&self) -> impl Iterator<Item = (GeometrySpec, Range<u32>)> + '_ {
         (0..3).flat_map(move |kind| {
             let mut starts = self.starts[kind].iter().peekable();
@@ -62,17 +54,103 @@ impl GeometryBatches {
         let len = self.banks[kind].len();
         len > 0 && (full || self.dirty[kind].get(len - 1) == Some(&(len - 1)))
     }
-    fn remove(&mut self, index: usize) {
+    /// Swap only boundary representatives, repairing both reverse indices.
+    fn swap(&mut self, kind: usize, a: usize, b: usize) -> bool {
+        if a == b {
+            return false;
+        }
+        self.banks[kind].swap(a, b);
+        self.specs[kind].swap(a, b);
+        self.slots[self.banks[kind][a] as usize].offset = a;
+        self.slots[self.banks[kind][b] as usize].offset = b;
+        self.dirty[kind].extend([a, b]);
+        true
+    }
+    fn remove(&mut self, index: usize) -> bool {
         let Slot { kind, offset } = self.slots[index];
-        self.bump(kind);
-        self.banks[kind].swap_remove(offset);
-        self.specs[kind].swap_remove(offset);
-        self.starts[kind].split_off(&self.specs[kind].len());
-        self.boundary(kind, offset);
-        self.boundary(kind, offset + 1);
-        if let Some(&moved) = self.banks[kind].get(offset) {
-            self.slots[moved as usize].offset = offset;
-            self.dirty[kind].push(offset);
+        let spec = self.specs[kind][offset];
+        let range = self.groups[kind][&spec].clone();
+        let mut moved = self.swap(kind, offset, range.end - 1);
+        if range.len() == 1 {
+            self.groups[kind].remove(&spec);
+            self.starts[kind].remove(&range.start);
+        } else {
+            self.groups[kind].get_mut(&spec).unwrap().end -= 1;
+        }
+        // Carry the hole through one tail element per following group.
+        let following: Vec<_> = self.starts[kind]
+            .range(range.end..)
+            .map(|(&start, &spec)| (start, spec))
+            .collect();
+        let mut hole = range.end - 1;
+        for (start, spec) in following {
+            let end = self.groups[kind][&spec].end;
+            moved |= self.swap(kind, hole, end - 1);
+            self.starts[kind].remove(&start);
+            self.starts[kind].insert(start - 1, spec);
+            let group = self.groups[kind].get_mut(&spec).unwrap();
+            group.start -= 1;
+            group.end -= 1;
+            hole = end - 1;
+        }
+        self.banks[kind].pop();
+        self.specs[kind].pop();
+        moved
+    }
+    fn insert(&mut self, index: usize, spec: GeometrySpec) -> bool {
+        let kind = spec.kind as usize;
+        let offset = self.banks[kind].len();
+        self.banks[kind].push(index as u32);
+        self.specs[kind].push(spec);
+        self.slots[index] = Slot { kind, offset };
+        self.dirty[kind].push(offset);
+        let Some(range) = self.groups[kind].get(&spec).cloned() else {
+            self.groups[kind].insert(spec, offset..offset + 1);
+            self.starts[kind].insert(offset, spec);
+            return false;
+        };
+        // Grow this group by carrying the inserted slot backwards through heads.
+        let following: Vec<_> = self.starts[kind]
+            .range(range.end..)
+            .map(|(&start, &spec)| (start, spec))
+            .collect();
+        let mut hole = offset;
+        let mut moved = false;
+        for (start, spec) in following.into_iter().rev() {
+            moved |= self.swap(kind, hole, start);
+            self.starts[kind].remove(&start);
+            self.starts[kind].insert(start + 1, spec);
+            let group = self.groups[kind].get_mut(&spec).unwrap();
+            group.start += 1;
+            group.end += 1;
+            hole = start;
+        }
+        self.groups[kind].get_mut(&spec).unwrap().end += 1;
+        moved
+    }
+    /// Cold start groups lightweight indices once; no per-instance boundary rotation.
+    fn initialize(&mut self, data: &[Instance]) {
+        let mut grouped = BTreeMap::<GeometrySpec, Vec<u32>>::new();
+        self.slots.resize(data.len(), Slot { kind: 0, offset: 0 });
+        for (index, instance) in data.iter().enumerate() {
+            grouped
+                .entry(instance.geometry_spec())
+                .or_default()
+                .push(index as u32);
+        }
+        for (spec, indices) in grouped {
+            let kind = spec.kind as usize;
+            let start = self.banks[kind].len();
+            for source in indices {
+                let offset = self.banks[kind].len();
+                self.slots[source as usize] = Slot { kind, offset };
+                self.banks[kind].push(source);
+                self.specs[kind].push(spec);
+                self.dirty[kind].push(offset);
+            }
+            self.starts[kind].insert(start, spec);
+            self.groups[kind].insert(spec, start..self.banks[kind].len());
+            self.bump(kind);
         }
     }
     pub fn sync(&mut self, data: &[Instance], ranges: impl IntoIterator<Item = Range<usize>>) {
@@ -81,46 +159,50 @@ impl GeometryBatches {
         }
         while self.slots.len() > data.len() {
             let index = self.slots.len() - 1;
+            let kind = self.slots[index].kind;
             self.remove(index);
+            self.bump(kind);
             self.slots.pop();
         }
-        // New slots must always be initialized, even when a caller supplies no dirty ranges.
+        if self.slots.is_empty() {
+            self.initialize(data);
+        }
+        // New slots are initialized even if no dirty range was supplied.
         for (index, instance) in data.iter().enumerate().skip(self.slots.len()) {
-            let kind = instance.geometry_kind() as usize;
-            let offset = self.banks[kind].len();
-            self.bump(kind);
-            self.banks[kind].push(index as u32);
-            self.specs[kind].push(instance.geometry_spec());
-            self.boundary(kind, offset);
-            self.slots.push(Slot { kind, offset });
-            self.dirty[kind].push(offset);
+            self.slots.push(Slot { kind: 0, offset: 0 });
+            self.insert(index, instance.geometry_spec());
+            self.bump(instance.geometry_kind() as usize);
         }
         for range in ranges {
             for index in range {
-                let kind = data[index].geometry_kind() as usize;
-                if self.slots[index].kind != kind {
-                    self.remove(index);
-                    let offset = self.banks[kind].len();
-                    self.bump(kind);
-                    self.banks[kind].push(index as u32);
-                    self.specs[kind].push(data[index].geometry_spec());
-                    self.boundary(kind, offset);
-                    self.slots[index] = Slot { kind, offset };
+                let slot = self.slots[index];
+                let spec = data[index].geometry_spec();
+                if self.specs[slot.kind][slot.offset] != spec {
+                    let removed = self.remove(index);
+                    let inserted = self.insert(index, spec);
+                    if slot.kind != spec.kind as usize {
+                        self.bump(slot.kind);
+                        self.bump(spec.kind as usize);
+                    } else if removed || inserted {
+                        self.bump(slot.kind);
+                    }
                 }
                 let slot = self.slots[index];
-                self.specs[slot.kind][slot.offset] = data[index].geometry_spec();
-                self.boundary(slot.kind, slot.offset);
-                self.boundary(slot.kind, slot.offset + 1);
                 self.dirty[slot.kind].push(slot.offset);
             }
         }
-        for dirty in &mut self.dirty {
+        for (kind, dirty) in self.dirty.iter_mut().enumerate() {
+            dirty.retain(|&offset| offset < self.banks[kind].len());
             dirty.sort_unstable();
             dirty.dedup();
         }
     }
     pub fn requires_banks(&self) -> bool {
         self.draws().nth(1).is_some() || self.starts.iter().any(|starts| starts.len() > 1)
+    }
+    pub(crate) fn bank_slot(&self, index: usize) -> (usize, u32) {
+        let slot = self.slots[index];
+        (slot.kind, slot.offset as u32)
     }
     pub fn indices(&self, kind: usize) -> &[u32] {
         &self.banks[kind]
@@ -211,6 +293,25 @@ mod tests {
                 assert_eq!(batches.slots[index].offset, offset);
                 assert_eq!(batches.slots[index].kind, kind);
             }
+        }
+        for kind in 0..3 {
+            assert_eq!(batches.groups[kind].len(), batches.starts[kind].len());
+            let mut end = 0;
+            for (&start, &spec) in &batches.starts[kind] {
+                assert_eq!(start, end);
+                let range = &batches.groups[kind][&spec];
+                assert_eq!(range.start, start);
+                assert!(!range.is_empty());
+                for offset in range.clone() {
+                    assert_eq!(batches.specs[kind][offset], spec);
+                    assert_eq!(
+                        data[batches.banks[kind][offset] as usize].geometry_spec(),
+                        spec
+                    );
+                }
+                end = range.end;
+            }
+            assert_eq!(end, batches.banks[kind].len());
         }
         assert!(seen.into_iter().all(|v| v));
         assert!(batches.draws().count() <= 3);
@@ -487,7 +588,7 @@ mod tests {
         }
     }
     #[test]
-    fn subdivision_draws_match_bank_slots_and_keep_gather_topology_revision() {
+    fn subdivision_draws_group_specs_and_invalidate_only_changed_gather_topology() {
         let mut data: Vec<_> = (0..1200).map(|i| instance(i, i % 3)).collect();
         let mut batches = GeometryBatches::default();
         batches.sync(&data, std::iter::once(0..data.len()));
@@ -511,11 +612,14 @@ mod tests {
                         .tag() as f32;
             }
             batches.sync(&data, std::iter::once(index..index + 1));
-            assert_eq!(batches.revision(1), before);
-            assert!(matches!(
-                plans.prepare(&limits, [160000, 160000], &batches, 1, true),
-                crate::gather::Prepared::Gather { upload: false, .. }
-            ));
+            let upload = match plans.prepare(&limits, [160000, 160000], &batches, 1, true) {
+                crate::gather::Prepared::Gather { upload, .. } => upload,
+                _ => panic!("fragmented bank should gather"),
+            };
+            assert_eq!(upload, batches.revision(1) != before);
+            let unique: std::collections::BTreeSet<_> =
+                data.iter().map(Instance::geometry_spec).collect();
+            assert_eq!(batches.geometry_draws().count(), unique.len());
             for (spec, range) in batches.geometry_draws() {
                 for offset in range {
                     let source = batches.indices(spec.kind as usize)[offset as usize] as usize;
@@ -553,5 +657,203 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    #[ignore = "CPU custom-spec benchmark; no GPU execution"]
+    fn custom_spec_benchmark() {
+        use std::time::Instant;
+        let mut data: Vec<_> = (0..100000)
+            .map(|i| {
+                let mut value = instance(i, 1);
+                value.color[3] = GeometrySpec::new(GeometryKind::Plane, [2 + (i % 4) as u16, 3])
+                    .unwrap()
+                    .tag() as f32;
+                value
+            })
+            .collect();
+        let mut batches = GeometryBatches::default();
+        let start = Instant::now();
+        batches.sync(&data, std::iter::once(0..data.len()));
+        let initial = start.elapsed().as_micros();
+        let draws = batches.geometry_draws().count();
+        let start = Instant::now();
+        for step in 0..100 {
+            data[step].color[0] += 1.;
+            batches.sync(&data, std::iter::once(step..step + 1));
+            std::hint::black_box(batches.geometry_draws().count());
+        }
+        println!(
+            "custom_specs,100000,{initial},{},{draws},{}",
+            start.elapsed().as_micros(),
+            batches.transfer_count(1, false)
+        );
+    }
+    #[test]
+    fn custom_spec_repacking_copies_preserve_bytes_and_sparse_edits() {
+        let mut data = Vec::new();
+        let mut batches = GeometryBatches::default();
+        let mut gpu: [Vec<Instance>; 3] = Default::default();
+        let mut seed = 7u32;
+        for step in 0..600 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let mut ranges = Vec::new();
+            if step % 5 == 0 && !data.is_empty() {
+                let index = seed as usize % data.len();
+                data.swap_remove(index);
+                if index < data.len() {
+                    ranges.push(index..index + 1);
+                }
+            } else {
+                let kind = if seed.is_multiple_of(2) {
+                    GeometryKind::Plane
+                } else {
+                    GeometryKind::Sphere
+                };
+                let mut value = instance(step, kind as usize);
+                value.color[3] =
+                    GeometrySpec::new(kind, [3 + (seed % 5) as u16, 2 + (seed % 3) as u16])
+                        .unwrap()
+                        .tag() as f32;
+                if step % 3 == 0 && !data.is_empty() {
+                    let index = seed as usize % data.len();
+                    data[index] = value;
+                    ranges.push(index..index + 1);
+                } else {
+                    data.push(value);
+                }
+            }
+            batches.sync(&data, ranges);
+            verify(&batches, &data);
+            let unique: std::collections::BTreeSet<_> =
+                data.iter().map(Instance::geometry_spec).collect();
+            assert_eq!(batches.geometry_draws().count(), unique.len());
+            for (kind, bank) in gpu.iter_mut().enumerate() {
+                bank.resize(batches.indices(kind).len(), instance(0, kind));
+                for copy in batches.copies(kind, false) {
+                    bank[copy.destination..copy.destination + copy.count]
+                        .copy_from_slice(&data[copy.source..copy.source + copy.count]);
+                }
+                for (offset, &source) in batches.indices(kind).iter().enumerate() {
+                    assert_eq!(
+                        bytemuck::bytes_of(&bank[offset]),
+                        bytemuck::bytes_of(&data[source as usize])
+                    );
+                }
+            }
+        }
+        let before = batches.revisions;
+        data[0].color[0] += 1.;
+        batches.sync(&data, std::iter::once(0..1));
+        assert_eq!(batches.revisions, before);
+        assert_eq!(
+            (0..3)
+                .map(|k| batches.transfer_count(k, false))
+                .sum::<usize>(),
+            1
+        );
+        batches.sync(&data, []);
+        assert_eq!(
+            (0..3)
+                .map(|k| batches.transfer_count(k, false))
+                .sum::<usize>(),
+            0
+        );
+    }
+    #[test]
+    #[ignore = "CPU local spec repacking benchmark; no GPU execution"]
+    fn local_spec_benchmark() {
+        use std::time::Instant;
+        for count in [10000, 100000] {
+            let mut data: Vec<_> = (0..count)
+                .map(|i| {
+                    let mut value = instance(i, 1);
+                    value.color[3] = GeometrySpec::new(GeometryKind::Plane, [2 + (i % 4) as u16, 3])
+                        .unwrap()
+                        .tag() as f32;
+                    value
+                })
+                .collect();
+            let mut batches = GeometryBatches::default();
+            let start = Instant::now();
+            batches.sync(&data, std::iter::once(0..count));
+            println!(
+                "local_spec,{count},initial,{},{}",
+                start.elapsed().as_nanos(),
+                batches.transfer_count(1, false)
+            );
+            for operation in ["spec", "append_remove", "rgb"] {
+                let start = Instant::now();
+                let mut transferred = 0;
+                for step in 0..100 {
+                    match operation {
+                        "spec" => {
+                            data[0].color[3] = GeometrySpec::new(
+                                GeometryKind::Plane,
+                                [if step % 2 == 0 { 5 } else { 2 }, 3],
+                            )
+                            .unwrap()
+                            .tag() as f32
+                        }
+                        "append_remove" => data.push(data[0]),
+                        _ => data[0].color[0] += 1.,
+                    }
+                    batches.sync(&data, std::iter::once(0..1));
+                    transferred += batches.transfer_count(1, false);
+                    if operation == "append_remove" {
+                        data.pop();
+                        batches.sync(&data, []);
+                        transferred += batches.transfer_count(1, false);
+                    }
+                    std::hint::black_box(batches.geometry_draws().count());
+                }
+                println!(
+                    "local_spec,{count},{operation},{},{transferred}",
+                    start.elapsed().as_nanos()
+                );
+            }
+        }
+    }
+    #[test]
+    fn local_repacking_is_bounded_by_specs_and_preserves_tag_only_cache() {
+        let tag = |width| {
+            GeometrySpec::new(GeometryKind::Plane, [width, 3])
+                .unwrap()
+                .tag() as f32
+        };
+        let mut data: Vec<_> = (0..100000)
+            .map(|i| {
+                let mut value = instance(i, 1);
+                value.color[3] = tag(2 + (i % 4) as u16);
+                value
+            })
+            .collect();
+        let mut batches = GeometryBatches::default();
+        batches.sync(&data, []);
+        for width in [5, 2, 17, 5, 17, 2] {
+            data[0].color[3] = tag(width);
+            batches.sync(&data, std::iter::once(0..1));
+            verify(&batches, &data);
+            let groups = batches.geometry_draws().count();
+            assert!(batches.transfer_count(1, false) <= 4 * groups + 4);
+            assert!(!batches.whole_bank(1, false));
+        }
+        data.push(data[0]);
+        batches.sync(&data, []);
+        assert!(batches.transfer_count(1, false) <= 10);
+        data.pop();
+        batches.sync(&data, []);
+        assert!(batches.transfer_count(1, false) <= 10);
+        data.clear();
+        batches.sync(&data, []);
+        assert_eq!(batches.geometry_draws().count(), 0);
+        assert_eq!(batches.transfer_count(1, false), 0);
+        data.push(instance(0, 1));
+        batches.sync(&data, []);
+        let revision = batches.revision(1);
+        data[0].color[3] = tag(19);
+        batches.sync(&data, std::iter::once(0..1));
+        assert_eq!(batches.revision(1), revision);
+        assert_eq!(batches.indices(1), &[0]);
+        verify(&batches, &data);
     }
 }

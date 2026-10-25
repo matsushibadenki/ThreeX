@@ -21,6 +21,7 @@ pub(crate) struct TransformStore {
     pub children: Vec<Vec<usize>>,
     pub dirty: Vec<u8>,
     pub packed_indices: Vec<Option<usize>>,
+    pub assets: std::collections::BTreeMap<usize, crate::AssetRef>,
     free: Vec<usize>,
 }
 impl TransformStore {
@@ -79,6 +80,7 @@ impl TransformStore {
         slot
     }
     pub fn remove(&mut self, slot: usize) {
+        self.assets.remove(&slot);
         self.ids[slot] = None;
         self.dirty[slot] = 0;
         self.packed_indices[slot] = None;
@@ -96,6 +98,7 @@ impl TransformStore {
             mesh: self.meshes[slot],
             geometry: self.geometries[slot],
             segments: self.segments[slot],
+            asset: self.assets.get(&slot).copied(),
         }
     }
     pub fn write(&mut self, slot: usize, o: Object) {
@@ -108,5 +111,13 @@ impl TransformStore {
         self.meshes[slot] = o.mesh;
         self.geometries[slot] = o.geometry;
         self.segments[slot] = o.segments;
+        match o.asset {
+            Some(asset) => {
+                self.assets.insert(slot, asset);
+            }
+            None => {
+                self.assets.remove(&slot);
+            }
+        }
     }
 }

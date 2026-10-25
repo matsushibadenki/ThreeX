@@ -2,7 +2,7 @@
 use crate::{Document, DocumentSnapshot, Object};
 use sha2::{Digest, Sha256};
 use std::fmt;
-pub const CONTENT_HASH_VERSION: u32 = 2;
+pub const CONTENT_HASH_VERSION: u32 = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentHash([u8; 32]);
 impl ContentHash {
@@ -38,6 +38,12 @@ fn hash_objects(count: usize, objects: impl Iterator<Item = (u32, Object)>) -> C
         }
         hash.update((o.flags()).to_le_bytes());
         hash.update(o.parent.to_le_bytes());
+        hash.update([u8::from(o.asset.is_some())]);
+        if let Some(asset) = o.asset {
+            hash.update(asset.id().bytes());
+            hash.update(asset.revision().to_le_bytes());
+            hash.update(asset.hash());
+        }
     }
     ContentHash(hash.finalize().into())
 }
@@ -135,7 +141,7 @@ mod tests {
     fn empty_document_golden_vector() {
         assert_eq!(
             Document::default().content_hash().to_string(),
-            "a3579d993a5e2331b60cabcb72205e88c888cf92bae1a812ff78f8567edfcf69"
+            "5e531ed1c6e76b4e2ba8d4600cdedc28af6940abe45add0820376ae37b423592"
         );
     }
     #[test]
@@ -146,7 +152,7 @@ mod tests {
         };
         assert_eq!(
             snapshot.content_hash().to_string(),
-            "7416e784440eb116163ba269002b8230f91dcebe026028233c2ffd607b5a272c"
+            "4bcd716cfb1c120ca172b99d4fefbb44deb84e40994df69b9e6a9589962aecd2"
         );
     }
 }

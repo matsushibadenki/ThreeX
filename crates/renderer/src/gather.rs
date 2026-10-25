@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn cached_plans_and_gpu_indices_survive_full_partial_and_membership_updates() {
         use crate::batching::GeometryBatches;
-        use threex_core::Instance;
+        use threex_core::{GeometryKind, GeometrySpec, Instance};
         let limits = wgpu::Limits {
             max_storage_buffer_binding_size: 2560,
             ..Default::default()
@@ -577,7 +577,22 @@ mod tests {
         let mut data: Vec<_> = (0..3000)
             .map(|i| Instance {
                 model: threex_core::identity(),
-                color: [f32::from_bits(0x7fc00000 + i), -0., 1., (i % 3 + 1) as f32],
+                color: [
+                    f32::from_bits(0x7fc00000 + i),
+                    -0.,
+                    1.,
+                    GeometrySpec::new(
+                        [GeometryKind::Box, GeometryKind::Plane, GeometryKind::Sphere]
+                            [(i % 3) as usize],
+                        if i % 3 == 0 {
+                            [0, 0]
+                        } else {
+                            [3 + (i % 4) as u16, 2 + (i % 3) as u16]
+                        },
+                    )
+                    .unwrap()
+                    .tag() as f32,
+                ],
             })
             .collect();
         let mut batches = GeometryBatches::default();
@@ -589,7 +604,18 @@ mod tests {
             let index = step * 17 % 700;
             data[index].color[2] = step as f32;
             if step % 29 == 0 {
-                data[index].color[3] = ((step + 1) % 3 + 1) as f32;
+                let kind =
+                    [GeometryKind::Box, GeometryKind::Plane, GeometryKind::Sphere][(step + 1) % 3];
+                data[index].color[3] = GeometrySpec::new(
+                    kind,
+                    if kind == GeometryKind::Box {
+                        [0, 0]
+                    } else {
+                        [3 + (step % 7) as u16, 2 + (step % 5) as u16]
+                    },
+                )
+                .unwrap()
+                .tag() as f32;
             }
             if step % 47 == 0 {
                 data.swap_remove(index);

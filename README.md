@@ -154,4 +154,9 @@ recovery and durable restart deduplication. [Benchmarks and limits](docs/four/pr
 
 Camera contracts, Rust computation and pending WASM verification: [docs/camera.md](docs/camera.md).
 
-[Primitive geometry, incremental mixed draws, subdivisions and v6 persistence](docs/geometry.md). Content hash schema is v2.
+[Primitive geometry, incremental mixed draws and subdivisions](docs/geometry.md).
+[Persistent asset references and worker guards](docs/assets.md): checkpoint/journal v7 (reads v1–6), content hash schema v3.
+
+[Minimal asset pages, coarse LOD and bounded residency](docs/asset-pages.md): verified Rust seek/read and Renderer APIs; [native loader dispatch and target-specific redraw](docs/native-asset-loader.md) are implemented, GPU display verification is Pending.
+
+[CPU bounds/frustum and screen-space LOD selection](docs/cpu-lod.md): per-instance hysteresis, root/proxy fallback, sparse bounds updates and resident gather index reuse are implemented. Hierarchical traversal follows in G03-B; actual GPU verification remains Pending.

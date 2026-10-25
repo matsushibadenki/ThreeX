@@ -38,6 +38,73 @@ pub(crate) fn frame_reply(
     })
 }
 impl IpcHost {
+    /// Trusted Rust file selection only. Queues bounded I/O, returns admission (not file bytes).
+    pub async fn load_asset(
+        &self,
+        label: &str,
+        handle: SurfaceHandle,
+        entity: u32,
+        path: std::path::PathBuf,
+        detail: bool,
+    ) -> Result<threex_storage::AssetLoadStatus, ErrorDto> {
+        let _permit = self
+            .pending
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ErrorDto::host("queue_full", Locale::En))?;
+        let receiver = {
+            let mut ingress = self
+                .ingress
+                .lock()
+                .map_err(|_| ErrorDto::host("stopped", Locale::En))?;
+            if ingress.stopped {
+                return Err(ErrorDto::host("stopped", Locale::En));
+            }
+            let grant = ingress
+                .grants
+                .get(label)
+                .ok_or_else(|| ErrorDto::host("forbidden", Locale::En))?;
+            if grant.surface != Some(handle) {
+                return Err(ErrorDto::host("surface_stale", Locale::En));
+            }
+            let id = ingress.next;
+            let next = id
+                .checked_add(1)
+                .ok_or_else(|| ErrorDto::host("stopped", Locale::En))?;
+            let receiver = self
+                .client
+                .try_submit(WorkerRequest {
+                    id,
+                    action: WorkerAction::LoadAsset {
+                        target: handle,
+                        entity,
+                        path,
+                        detail,
+                    },
+                })
+                .map_err(|e| {
+                    let mut error = ErrorDto::worker(
+                        threex_storage::WorkerFailure {
+                            code: e.code,
+                            current_revision: 0,
+                        },
+                        Locale::En,
+                    );
+                    error.observed_revision = None;
+                    error
+                })?;
+            ingress.next = next;
+            receiver
+        };
+        let reply = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|_| ErrorDto::host("stopped", Locale::En))?
+            .map_err(|_| ErrorDto::host("stopped", Locale::En))?;
+        match reply.result.map_err(|e| ErrorDto::worker(e, Locale::En))? {
+            WorkerOutcome::AssetLoad { status, .. } => Ok(status),
+            _ => Err(ErrorDto::host("stopped", Locale::En)),
+        }
+    }
     /// Trusted native event-loop code installs a fully prepared backend. A failed candidate preserves the old target.
     pub fn attach_surface(
         &self,

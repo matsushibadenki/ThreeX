@@ -1,19 +1,20 @@
-> 2026-10-17：現行はhash v2／保存形式v6。flags u32に分割数も含む。既定内容のhash入力は変更しない。[仕様](../subdivisions.md)。
+> 現行はhash v3／保存形式v7。asset参照もcanonical入力に含む。[G01-B仕様](../assets.md)。
 
-# 意味内容hash v2
+# 意味内容hash v3
 
 2026-10-15 JST。`Document::content_hash()`と`DocumentSnapshot::content_hash()`を実装。
 `ContentHash`は32byteのSHA-256で、Displayは小文字64桁hex。
-永続化／交換する側は`CONTENT_HASH_VERSION = 2`と組にして扱う。
+永続化／交換する側は`CONTENT_HASH_VERSION = 3`と組にして扱う。
 
 ## 正規化仕様
 
 SHA-256への入力は以下の順序。数値はlittle endian。checkpointのbyte列そのものはhashしない。
 
 1. ASCII `THREEX-CONTENT`＋NUL。
-2. hash schema version（u32＝2）。
+2. hash schema version（u32＝3）。
 3. Object数（u64）。
-4. Object ID昇順に各60byte：ID（u32）、position／rotation／scale／colorの順の12個のf32、flags（u32）、parent ID（u32）。
+4. Object ID昇順に、まず従来の各60byte：ID（u32）、position／rotation／scale／colorの順の12個のf32、flags（u32）、parent ID（u32）。
+5. 各Objectの直後にasset有無u8。参照ありならAssetId16 bytes、revision u64 LE、期待内容hash32 bytes。
 
 flagsはbit0＝visible、bit1＝mesh、bits2–3＝geometry（Box=0／Plane=1／Sphere=2）。
 bits4–12／13–21はcustom分割数。既定値は両fieldを0へ正規化し、bits22–31は0。
@@ -26,7 +27,7 @@ Document ID・revision・Undo／Redo・履歴上限・request／session receipts
 同じ現在内容なら、別の作成順序・編集履歴・文書IDでも同じhashになる。
 Undoで以前の内容へ戻れば同じhashになり、Redoで再編集内容のhashへ戻る。
 canonical fieldやencodingが変わる場合はhash schema versionを更新する。
-今回は既存flags u32の有効値域を拡張し、field・正規化・既存内容の入力bytesは変更しない。
+v3はasset参照fieldと有無markerを追加したため、assetなしでもv2とdigestが異なる。
 
 ## 接続
 
@@ -36,13 +37,13 @@ canonical fieldやencodingが変わる場合はhash schema versionを更新す�
 
 workerの通常state／edit応答では毎回hashしない。計算はO(Object数)、追加の作業メモリは一定。
 明示queryと保存captureは全Objectを走査する。差分Merkle hashやhash cacheは今回導入していない。
-checkpoint／journal formatは現在v6（hash導入時はv2）で、hashは保存receiptのメモリ上の情報。読込後は内容から再計算する。
+checkpoint／journal formatは現在v7（hash導入時はv2）で、hashは保存receiptのメモリ上の情報。読込後は内容から再計算する。
 
 **hash一致を編集鮮度・再送・保存の判定へ置換しない。**
 同じ内容にUndoしてもrevision／receipt metadataが変わり得るため、`SaveReceipt::is_current`、
 prepared groupのScene identity／revision、request metadata世代と永続watermarkの既存guardを維持する。
 このhashは認証・文書IDやcheckpoint CRCの代替ではない。
-将来の非同期評価結果への適用guardやTauri JSON IPCは未実装。
+asset結果にはDocument identity／revisionとAssetRefによるguardを実装済み。汎用評価WorldのguardはLater。
 
 ## 検証
 
@@ -55,7 +56,7 @@ prepared groupのScene identity／revision、request metadata世代と永続wate
 - journal未保存変更・破損末尾・修復追記・compaction後の内容hash。
 - worker照会のqueue順序、readで同期が増えないこと、再起動後の一致。
 
-core39＋storage46＋WGSL1＋JS4＝90件成功。core／storageはdebugとreleaseで検証。
+hash初回導入時の記録：core39＋storage46＋WGSL1＋JS4＝90件成功。最新の全体検証は[ROADMAP](../roadmap.md)を参照。
 既存の障害復旧・再送重複排除・group commitテストを維持。実GPUテスト1件は環境制約でignore。
 
 ```sh
@@ -65,7 +66,7 @@ cargo clippy --offline --workspace --all-targets --all-features -- -D warnings
 npm test
 ```
 
-- 🟢 [Done] 意味内容hash v2、snapshot／保存receipt／worker明示query、正規化・保存／復旧テスト。
+- 🟢 [Done] 意味内容hash v3、snapshot／保存receipt／worker明示query、正規化・保存／復旧テスト。
 - 🟢 [Done] Tauri async／IPC認可・Rust Renderer接続（[仕様](native-renderer.md)）。
 - 🔴 [Later] 評価World分離と非同期評価結果guard、必要に応じた差分hash。
 - ⭕️ [Pending] 実UI・WASM／実GPU・他OS durability検証。

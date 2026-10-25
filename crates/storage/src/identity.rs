@@ -29,6 +29,10 @@ fn random() -> std::io::Result<[u8; 16]> {
 pub fn new_session_id() -> std::io::Result<SessionId> {
     Ok(SessionId::from_bytes(random()?).unwrap())
 }
+/// Host-generated persistent asset identity; content revisions are supplied by the importer.
+pub fn new_asset_id() -> std::io::Result<threex_core::AssetId> {
+    Ok(threex_core::AssetId::from_bytes(random()?).unwrap())
+}
 impl DocumentStore {
     pub(super) fn read_identity(&self) -> Result<Option<DocumentId>, StorageError> {
         let f = match File::open(self.root.join("document.id")) {

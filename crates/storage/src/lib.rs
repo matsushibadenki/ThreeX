@@ -1,8 +1,13 @@
 //! Native persistence host. Document format lives in core; filesystem stays here.
+mod asset_loader;
+pub mod asset_pages;
+pub use asset_loader::{
+    ASSET_LOAD_CAPACITY, ASSET_LOAD_THREADS, AssetLoadStatus, AssetLoaderStats,
+};
 mod identity;
 mod journal;
 mod protocol;
-pub use identity::new_session_id;
+pub use identity::{new_asset_id, new_session_id};
 pub use protocol::{
     ProtocolAction, ProtocolFailure, ProtocolReceipt, ProtocolRequest, REQUEST_PROTOCOL_VERSION,
 };
@@ -461,15 +466,15 @@ mod tests {
         let receipt = store.save(&d).unwrap();
         let path = store.path(receipt.generation);
         let mut b = fs::read(&path).unwrap();
-        b[8..12].copy_from_slice(&7u32.to_le_bytes());
+        b[8..12].copy_from_slice(&8u32.to_le_bytes());
         fs::write(&path, &b).unwrap();
         assert!(matches!(
             store.load(),
-            Err(StorageError::Format(CheckpointError::UnsupportedVersion(7)))
+            Err(StorageError::Format(CheckpointError::UnsupportedVersion(8)))
         ));
         assert!(matches!(
             store.save(&d),
-            Err(StorageError::Format(CheckpointError::UnsupportedVersion(7)))
+            Err(StorageError::Format(CheckpointError::UnsupportedVersion(8)))
         ));
         assert_eq!(fs::read(path).unwrap(), b);
         let lock = OpenOptions::new()
@@ -535,3 +540,9 @@ mod tests {
         assert_eq!(current.content_hash, original);
     }
 }
+
+#[cfg(test)]
+mod assets_tests;
+
+#[cfg(test)]
+mod loader_tests;

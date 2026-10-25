@@ -1,0 +1,7 @@
+phase,sample,instances,initial_sync_us,100_sparse_updates_and_draw_count_us,draws,last_dirty_slots
+before,1,100000,16350,7763,100000,1
+before,2,100000,15826,8655,100000,1
+before,3,100000,16335,8368,100000,1
+after,1,100000,30074,8,4,1
+after,2,100000,29220,6,4,1
+after,3,100000,29582,8,4,1

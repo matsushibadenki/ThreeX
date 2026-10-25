@@ -1,8 +1,16 @@
 //! Bounded native host service. Commands enter; small state/results leave.
+use crate::asset_loader::{
+    ASSET_LOAD_CAPACITY, AssetLoadStatus, AssetLoaderStats, Completion, DiskSource, Loader,
+    PageSource, Task,
+};
 use crate::{AutosaveDocument, DocumentStore, StorageError};
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -42,6 +50,20 @@ pub enum WorkerAction {
     InspectSession {
         session_id: threex_core::SessionId,
     },
+    BeginAssetJob {
+        id: u32,
+    },
+    FinishAssetJob {
+        ticket: threex_renderer::resource_handles::ResourceHandle,
+        reference: threex_core::AssetRef,
+    },
+    LoadAsset {
+        target: threex_renderer::native::SurfaceHandle,
+        entity: u32,
+        path: std::path::PathBuf,
+        detail: bool,
+    },
+    InspectAssetLoads,
     Save,
     Inspect,
     InspectContentHash,
@@ -178,6 +200,25 @@ pub struct WorkerState {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkerOutcome {
+    AssetLoad {
+        status: AssetLoadStatus,
+        ticket: Option<threex_renderer::resource_handles::ResourceHandle>,
+        state: WorkerState,
+    },
+    AssetLoads {
+        stats: AssetLoaderStats,
+        state: WorkerState,
+    },
+    AssetJob {
+        ticket: Option<threex_renderer::resource_handles::ResourceHandle>,
+        reference: Option<threex_core::AssetRef>,
+        state: WorkerState,
+    },
+    AssetFinished {
+        accepted: bool,
+        reference: Option<threex_core::AssetRef>,
+        state: WorkerState,
+    },
     Rendered {
         result:
             Result<threex_renderer::native::FrameStatus, threex_renderer::native::SurfaceFailure>,
@@ -231,14 +272,20 @@ pub enum WorkerStartError {
     Storage(StorageError),
     Stopped,
 }
-struct Message {
+pub(crate) struct Message {
     request: WorkerRequest,
     reply: mpsc::Sender<WorkerReply>,
+}
+pub(crate) enum Envelope {
+    Client(Message),
+    Asset(Completion),
+    Wake,
 }
 /// Window-independent client. Submission never waits for queue space or disk IO.
 #[derive(Clone)]
 pub struct WorkerClient {
-    sender: Arc<Mutex<Option<mpsc::SyncSender<Message>>>>,
+    sender: Arc<Mutex<Option<mpsc::SyncSender<Envelope>>>>,
+    closed: Arc<AtomicBool>,
 }
 impl WorkerClient {
     pub fn try_submit(
@@ -257,6 +304,10 @@ impl WorkerClient {
         {
             return reject(request, WorkerCode::CommandTooLarge);
         }
+        if matches!(&request.action,WorkerAction::LoadAsset {path,..} if path.as_os_str().as_encoded_bytes().len()>8192)
+        {
+            return reject(request, WorkerCode::CommandTooLarge);
+        }
         let Ok(sender) = self.sender.lock() else {
             return reject(request, WorkerCode::Stopped);
         };
@@ -264,10 +315,15 @@ impl WorkerClient {
             return reject(request, WorkerCode::Stopped);
         };
         let (reply, receiver) = mpsc::channel();
-        match sender.try_send(Message { request, reply }) {
+        match sender.try_send(Envelope::Client(Message { request, reply })) {
             Ok(()) => Ok(receiver),
-            Err(mpsc::TrySendError::Full(m)) => reject(m.request, WorkerCode::QueueFull),
-            Err(mpsc::TrySendError::Disconnected(m)) => reject(m.request, WorkerCode::Stopped),
+            Err(mpsc::TrySendError::Full(Envelope::Client(m))) => {
+                reject(m.request, WorkerCode::QueueFull)
+            }
+            Err(mpsc::TrySendError::Disconnected(Envelope::Client(m))) => {
+                reject(m.request, WorkerCode::Stopped)
+            }
+            _ => unreachable!("client envelope"),
         }
     }
 }
@@ -291,6 +347,14 @@ impl JournalWorker {
         config: WorkerConfig,
         surfaces: threex_renderer::native::NativeSurfaces,
     ) -> Result<Self, WorkerStartError> {
+        Self::start_native(store, config, surfaces, Arc::new(DiskSource))
+    }
+    pub(crate) fn start_native(
+        store: DocumentStore,
+        config: WorkerConfig,
+        surfaces: threex_renderer::native::NativeSurfaces,
+        source: Arc<dyn PageSource>,
+    ) -> Result<Self, WorkerStartError> {
         if !(1..=64).contains(&config.queue_capacity)
             || !(1..=32).contains(&config.batch_size)
             || !(1..=256).contains(&config.result_capacity)
@@ -300,6 +364,9 @@ impl JournalWorker {
         }
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
         let (ready, startup) = mpsc::channel();
+        let closed = Arc::new(AtomicBool::new(false));
+        let driver_closed = closed.clone();
+        let completion_sender = sender.clone();
         let join = thread::Builder::new()
             .name("threex-document".into())
             .spawn(move || {
@@ -320,8 +387,24 @@ impl JournalWorker {
                     }
                 };
                 let render_stamp = Some(owner.document().scene().stamp());
+                let loader = match Loader::new(completion_sender, source) {
+                    Ok(loader) => loader,
+                    Err(e) => {
+                        let _ = ready.send(Err(StorageError::Io(e)));
+                        return;
+                    }
+                };
                 let mut service = Service {
+                    loader,
+                    load_tickets: threex_renderer::resource_handles::ResourcePool::new(
+                        ASSET_LOAD_CAPACITY,
+                    ),
+                    loads: BTreeMap::new(),
+                    load_stats: AssetLoaderStats::default(),
+                    closed: driver_closed,
                     render_stamp,
+                    asset_jobs: threex_renderer::resource_handles::ResourcePool::new(128),
+                    asset_guards: BTreeMap::new(),
                     surfaces,
                     owner,
                     saved,
@@ -344,6 +427,7 @@ impl JournalWorker {
         Ok(Self {
             client: WorkerClient {
                 sender: Arc::new(Mutex::new(Some(sender))),
+                closed,
             },
             join: Some(join),
             initial_state,
@@ -353,8 +437,11 @@ impl JournalWorker {
         self.client.clone()
     }
     fn close(&self) {
-        if let Ok(mut sender) = self.client.sender.lock() {
-            sender.take();
+        if let Ok(mut sender) = self.client.sender.lock()
+            && let Some(sender) = sender.take()
+        {
+            self.client.closed.store(true, Ordering::Release);
+            let _ = sender.try_send(Envelope::Wake);
         }
     }
     pub fn shutdown(mut self) -> thread::Result<()> {
@@ -368,7 +455,23 @@ impl Drop for JournalWorker {
     }
 }
 type ResultValue = Result<WorkerOutcome, WorkerFailure>;
+struct LoadJob {
+    guard: threex_core::AssetJobGuard,
+    target: threex_renderer::native::SurfaceHandle,
+    path: std::path::PathBuf,
+    level: u8,
+    detail: bool,
+    cancelled: bool,
+}
 struct Service {
+    loader: Loader,
+    load_tickets: threex_renderer::resource_handles::ResourcePool<()>,
+    loads: BTreeMap<threex_renderer::resource_handles::ResourceHandle, LoadJob>,
+    load_stats: AssetLoaderStats,
+    closed: Arc<AtomicBool>,
+    asset_jobs: threex_renderer::resource_handles::ResourcePool<()>,
+    asset_guards:
+        BTreeMap<threex_renderer::resource_handles::ResourceHandle, threex_core::AssetJobGuard>,
     render_stamp: Option<threex_core::SceneStamp>,
     surfaces: threex_renderer::native::NativeSurfaces,
     owner: AutosaveDocument,
@@ -380,6 +483,171 @@ struct Service {
     config: WorkerConfig,
 }
 impl Service {
+    fn load_asset(
+        &mut self,
+        target: threex_renderer::native::SurfaceHandle,
+        entity: u32,
+        path: &std::path::Path,
+        detail: bool,
+    ) -> WorkerOutcome {
+        let outcome = |this: &Self, status, ticket| WorkerOutcome::AssetLoad {
+            status,
+            ticket,
+            state: this.state(),
+        };
+        if self.surfaces.size(target).is_err() {
+            return outcome(self, AssetLoadStatus::StaleTarget, None);
+        }
+        let Some(guard) = self.owner.document().asset_job_guard(entity) else {
+            return outcome(self, AssetLoadStatus::MissingReference, None);
+        };
+        if let Some((&ticket, _)) = self.loads.iter().find(|(_, job)| {
+            !job.cancelled
+                && job.target == target
+                && job.guard == guard
+                && job.path == path
+                && job.detail == detail
+        }) {
+            return outcome(self, AssetLoadStatus::Queued, Some(ticket));
+        }
+        let Some(ticket) = self.load_tickets.reserve() else {
+            self.load_stats.capacity_rejections += 1;
+            return outcome(self, AssetLoadStatus::Busy, None);
+        };
+        let task = Task {
+            ticket,
+            path: path.to_owned(),
+            reference: guard.reference(),
+            level: 0,
+        };
+        if self.loader.submit(task).is_err() {
+            self.load_tickets.release(ticket);
+            self.load_stats.capacity_rejections += 1;
+            return outcome(self, AssetLoadStatus::Busy, None);
+        }
+        for job in self
+            .loads
+            .values_mut()
+            .filter(|j| j.target == target && j.guard.entity() == entity)
+        {
+            job.cancelled = true;
+        }
+        self.loads.insert(
+            ticket,
+            LoadJob {
+                guard,
+                target,
+                path: path.to_owned(),
+                level: 0,
+                detail,
+                cancelled: false,
+            },
+        );
+        self.load_stats.queued += 1;
+        self.load_stats.pending(self.loads.len());
+        outcome(self, AssetLoadStatus::Queued, Some(ticket))
+    }
+    fn complete_load(&mut self, completion: Completion) {
+        if !self
+            .loads
+            .get(&completion.ticket)
+            .is_some_and(|job| job.level == completion.level)
+        {
+            return;
+        }
+        let Some(mut job) = self.loads.remove(&completion.ticket) else {
+            return;
+        };
+        let document = self.owner.document();
+        if job.cancelled || !document.accepts_asset_result(&job.guard, job.guard.reference()) {
+            self.load_stats.stale += 1;
+        } else if let Some(manifest) = completion.loaded.manifest {
+            let has_detail = manifest.page(1).is_some();
+            match self.surfaces.upload_asset(
+                document,
+                job.target,
+                job.guard.entity(),
+                manifest,
+                job.level,
+                completion.loaded.page,
+            ) {
+                Ok(delivery) => {
+                    if delivery.changed {
+                        self.surfaces.asset_changed(job.target);
+                    }
+                    if delivery.ready {
+                        self.load_stats.completed += 1;
+                    } else {
+                        self.load_stats.failed += 1;
+                    }
+                    if delivery.ready && job.level == 0 && job.detail && has_detail {
+                        // Root input was consumed/dropped before starting detail under the same lease.
+                        job.level = 1;
+                        let task = Task {
+                            ticket: completion.ticket,
+                            path: job.path.clone(),
+                            reference: job.guard.reference(),
+                            level: 1,
+                        };
+                        if self.loader.submit(task).is_ok() {
+                            self.loads.insert(completion.ticket, job);
+                            self.load_stats.pending(self.loads.len());
+                            return;
+                        }
+                        self.load_stats.failed += 1;
+                    }
+                }
+                Err(threex_renderer::native::SurfaceFailure::Stale) => self.load_stats.stale += 1,
+                Err(_) => self.load_stats.failed += 1,
+            }
+        } else {
+            self.load_stats.failed += 1;
+        }
+        self.load_tickets.release(completion.ticket);
+        self.load_stats.pending(self.loads.len());
+    }
+
+    fn begin_asset(&mut self, id: u32) -> WorkerOutcome {
+        let document = self.owner.document();
+        self.asset_guards.retain(|ticket, guard| {
+            let keep =
+                guard.entity() != id && document.accepts_asset_result(guard, guard.reference());
+            if !keep {
+                self.asset_jobs.release(*ticket);
+            }
+            keep
+        });
+        let guard = document.asset_job_guard(id);
+        let reference = guard.as_ref().map(|g| g.reference());
+        let ticket = guard.and_then(|guard| {
+            let ticket = self.asset_jobs.reserve()?;
+            self.asset_guards.insert(ticket, guard);
+            Some(ticket)
+        });
+        WorkerOutcome::AssetJob {
+            ticket,
+            reference,
+            state: self.state(),
+        }
+    }
+    fn finish_asset(
+        &mut self,
+        ticket: threex_renderer::resource_handles::ResourceHandle,
+        reference: threex_core::AssetRef,
+    ) -> WorkerOutcome {
+        let accepted = self.asset_guards.remove(&ticket).is_some_and(|guard| {
+            self.owner
+                .document()
+                .accepts_asset_result(&guard, reference)
+                && self.asset_jobs.publish(ticket, ()).is_ok()
+        });
+        self.asset_jobs.release(ticket);
+        WorkerOutcome::AssetFinished {
+            accepted,
+            reference: accepted.then_some(reference),
+            state: self.state(),
+        }
+    }
     fn state(&self) -> WorkerState {
         let d = self.owner.document();
         WorkerState {
@@ -493,94 +761,139 @@ impl Service {
         }
         false
     }
-    fn run(&mut self, receiver: mpsc::Receiver<Message>) {
-        while let Ok(first) = receiver.recv() {
-            let mut chunk = VecDeque::from([first]);
+    fn run(&mut self, receiver: mpsc::Receiver<Envelope>) {
+        loop {
+            let first = match receiver.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    if self.closed.load(Ordering::Acquire) && self.loads.is_empty() {
+                        break;
+                    }
+                    match receiver.recv() {
+                        Ok(event) => event,
+                        Err(_) => break,
+                    }
+                }
+            };
+            let mut events = VecDeque::from([first]);
             let deadline = Instant::now() + self.config.batch_window;
-            while chunk.len() < self.config.batch_size {
+            while events.len() < self.config.batch_size {
                 match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                    Ok(m) => chunk.push_back(m),
+                    Ok(e) => events.push_back(e),
                     Err(_) => break,
                 }
             }
-            while let Some(message) = chunk.pop_front() {
-                if self.replay(&message) {
-                    continue;
-                }
-                if matches!(message.request.action, WorkerAction::Commit { .. }) {
-                    self.group(message, &mut chunk);
-                    continue;
-                }
-                if matches!(&message.request.action, WorkerAction::Protocol(r) if matches!(r.action, crate::ProtocolAction::Commit { .. }))
-                {
-                    self.protocol_group(message, &mut chunk);
-                    continue;
-                }
-                let result = match &message.request.action {
-                    WorkerAction::Render(request) => Ok(WorkerOutcome::Rendered {
-                        result: self
-                            .surfaces
-                            .execute(self.owner.document().scene(), request),
-                        state: self.state(),
-                    }),
-                    WorkerAction::InspectSession { session_id } => Ok(WorkerOutcome::Session {
-                        session_id: *session_id,
-                        sequence: self.owner.document().session_sequence(*session_id),
-                        status: self.owner.document().session_status(*session_id),
-                        state: self.state(),
-                    }),
-                    WorkerAction::Protocol(request) => {
-                        let generation = self.owner.document().request_generation();
-                        let result = self.owner.request(request);
-                        if self.owner.document().request_generation() != generation {
-                            self.sync_groups += 1;
+            while let Some(event) = events.pop_front() {
+                match event {
+                    Envelope::Wake => (),
+                    Envelope::Asset(completion) => self.complete_load(completion),
+                    Envelope::Client(first) => {
+                        let mut chunk = VecDeque::from([first]);
+                        while matches!(events.front(), Some(Envelope::Client(_))) {
+                            let Some(Envelope::Client(message)) = events.pop_front() else {
+                                unreachable!()
+                            };
+                            chunk.push_back(message);
                         }
-                        result.map(|receipt| WorkerOutcome::Protocol {
-                            revision: receipt.revision,
-                            replayed: receipt.replayed,
-                            state: self.state(),
-                        })
+                        self.process_chunk(&mut chunk);
                     }
-                    WorkerAction::Undo { expected_revision } => {
-                        self.owner.undo(*expected_revision).map(|revision| {
-                            self.sync_groups += 1;
-                            WorkerOutcome::Changed {
-                                revision,
-                                state: self.state(),
-                            }
-                        })
-                    }
-                    WorkerAction::Redo { expected_revision } => {
-                        self.owner.redo(*expected_revision).map(|revision| {
-                            self.sync_groups += 1;
-                            WorkerOutcome::Changed {
-                                revision,
-                                state: self.state(),
-                            }
-                        })
-                    }
-                    WorkerAction::Save => self.owner.save().map(|receipt| {
-                        self.saved = Some(receipt.revision);
-                        WorkerOutcome::Saved {
-                            generation: receipt.generation,
-                            state: self.state(),
-                        }
-                    }),
-                    WorkerAction::InspectContentHash => Ok(WorkerOutcome::ContentHash {
-                        hash: self.owner.document().content_hash(),
-                        state: self.state(),
-                    }),
-                    WorkerAction::Inspect => Ok(WorkerOutcome::State(self.state())),
-                    WorkerAction::ReadObject { id } => Ok(WorkerOutcome::Object {
-                        id: *id,
-                        object: self.owner.document().scene().object(*id),
-                        state: self.state(),
-                    }),
-                    WorkerAction::Commit { .. } => unreachable!(),
                 }
-                .map_err(|e| self.storage_error(e));
-                self.finish(message, result);
             }
+        }
+    }
+    fn process_chunk(&mut self, chunk: &mut VecDeque<Message>) {
+        while let Some(message) = chunk.pop_front() {
+            if self.replay(&message) {
+                continue;
+            }
+            if matches!(message.request.action, WorkerAction::Commit { .. }) {
+                self.group(message, chunk);
+                continue;
+            }
+            if matches!(&message.request.action, WorkerAction::Protocol(r) if matches!(r.action, crate::ProtocolAction::Commit { .. }))
+            {
+                self.protocol_group(message, chunk);
+                continue;
+            }
+            let result = match &message.request.action {
+                WorkerAction::Render(request) => Ok(WorkerOutcome::Rendered {
+                    result: self
+                        .surfaces
+                        .execute(self.owner.document().scene(), request),
+                    state: self.state(),
+                }),
+                WorkerAction::InspectSession { session_id } => Ok(WorkerOutcome::Session {
+                    session_id: *session_id,
+                    sequence: self.owner.document().session_sequence(*session_id),
+                    status: self.owner.document().session_status(*session_id),
+                    state: self.state(),
+                }),
+                WorkerAction::Protocol(request) => {
+                    let generation = self.owner.document().request_generation();
+                    let result = self.owner.request(request);
+                    if self.owner.document().request_generation() != generation {
+                        self.sync_groups += 1;
+                    }
+                    result.map(|receipt| WorkerOutcome::Protocol {
+                        revision: receipt.revision,
+                        replayed: receipt.replayed,
+                        state: self.state(),
+                    })
+                }
+                WorkerAction::Undo { expected_revision } => {
+                    self.owner.undo(*expected_revision).map(|revision| {
+                        self.sync_groups += 1;
+                        WorkerOutcome::Changed {
+                            revision,
+                            state: self.state(),
+                        }
+                    })
+                }
+                WorkerAction::Redo { expected_revision } => {
+                    self.owner.redo(*expected_revision).map(|revision| {
+                        self.sync_groups += 1;
+                        WorkerOutcome::Changed {
+                            revision,
+                            state: self.state(),
+                        }
+                    })
+                }
+                WorkerAction::BeginAssetJob { id } => Ok(self.begin_asset(*id)),
+                WorkerAction::FinishAssetJob { ticket, reference } => {
+                    Ok(self.finish_asset(*ticket, *reference))
+                }
+                WorkerAction::Save => self.owner.save().map(|receipt| {
+                    self.saved = Some(receipt.revision);
+                    WorkerOutcome::Saved {
+                        generation: receipt.generation,
+                        state: self.state(),
+                    }
+                }),
+                WorkerAction::InspectContentHash => Ok(WorkerOutcome::ContentHash {
+                    hash: self.owner.document().content_hash(),
+                    state: self.state(),
+                }),
+                WorkerAction::LoadAsset {
+                    target,
+                    entity,
+                    path,
+                    detail,
+                } => Ok(self.load_asset(*target, *entity, path, *detail)),
+                WorkerAction::InspectAssetLoads => Ok(WorkerOutcome::AssetLoads {
+                    stats: self.load_stats.clone(),
+                    state: self.state(),
+                }),
+                WorkerAction::Inspect => Ok(WorkerOutcome::State(self.state())),
+                WorkerAction::ReadObject { id } => Ok(WorkerOutcome::Object {
+                    id: *id,
+                    object: self.owner.document().scene().object(*id),
+                    state: self.state(),
+                }),
+                WorkerAction::Commit { .. } => unreachable!(),
+            }
+            .map_err(|e| self.storage_error(e));
+            self.finish(message, result);
         }
     }
     fn protocol_group(&mut self, first: Message, chunk: &mut VecDeque<Message>) {
@@ -876,6 +1189,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
         let c = WorkerClient {
             sender: Arc::new(Mutex::new(Some(sender))),
+            closed: Arc::new(AtomicBool::new(false)),
         };
         let first = c.try_submit(commit(1, 0, 1)).unwrap();
         let rejected = c.try_submit(commit(2, 1, 2)).unwrap_err();

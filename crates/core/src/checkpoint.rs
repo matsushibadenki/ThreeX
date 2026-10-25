@@ -11,7 +11,7 @@ pub enum CheckpointError {
     InvalidScene(String),
 }
 const MAGIC: &[u8; 8] = b"THREEXD\0";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 pub const MAX_CHECKPOINT_BYTES: usize = 128 * 1024 * 1024;
 const MAX_HISTORY: usize = 8 * 1024 * 1024;
 const MAX_COMMAND: usize = 256 * 1024;
@@ -27,7 +27,7 @@ fn checksum(bytes: &[u8]) -> u32 {
     !crc
 }
 impl Document {
-    /// Version 6: tessellation flags, durable outcomes, identity, session tombstones and bounded history.
+    /// Version 7: persistent asset references; v1–6 remain readable.
     /// No GPU indices, renderer stamps or OS handles are persisted.
     pub fn checkpoint(&self) -> Result<Vec<u8>, CheckpointError> {
         if self.scene.len() > MAX_OBJECTS
@@ -80,6 +80,18 @@ impl Document {
             b.extend((error.len() as u32).to_le_bytes());
             b.extend(error);
             b.extend(&r.commands);
+        }
+        let assets: Vec<_> = self
+            .scene
+            .objects()
+            .filter_map(|(id, o)| o.asset.map(|a| (id, a)))
+            .collect();
+        // Omit the extension for an asset-free document, retaining legacy payload layout.
+        if !assets.is_empty() {
+            b.extend((assets.len() as u64).to_le_bytes());
+            for (id, asset) in assets {
+                b.extend(crate::asset_command(id, Some(asset)));
+            }
         }
         if b.len() + 4 > MAX_CHECKPOINT_BYTES {
             return Err(CheckpointError::TooLarge);
@@ -167,6 +179,13 @@ impl Document {
                                 != 0
                     })
                 })
+            {
+                return Err(CheckpointError::Corrupt);
+            }
+            if version < 7
+                && [&edit.forward, &edit.inverse]
+                    .iter()
+                    .any(|b| crate::assets::has_commands(b))
             {
                 return Err(CheckpointError::Corrupt);
             }
@@ -265,6 +284,9 @@ impl Document {
                     return Err(CheckpointError::TooLarge);
                 }
                 let commands = r.take(count)?.to_vec();
+                if version < 7 && failure.is_none() && crate::assets::has_commands(&commands) {
+                    return Err(CheckpointError::Corrupt);
+                }
                 document.ledger.receipts.push_back(crate::request::Receipt {
                     session,
                     sequence,
@@ -278,6 +300,27 @@ impl Document {
             if sessions > 0 && document.id.is_none() {
                 return Err(CheckpointError::Corrupt);
             }
+        }
+        if version >= 7 && r.at < r.bytes.len() {
+            let count = r.size(MAX_OBJECTS)?;
+            if count == 0 {
+                return Err(CheckpointError::Corrupt);
+            }
+            let records = r.take(count.checked_mul(64).ok_or(CheckpointError::TooLarge)?)?;
+            let mut last = 0;
+            for c in records.as_chunks::<64>().0 {
+                let id = u32::from_le_bytes(c[4..8].try_into().unwrap());
+                if c[..4] != 4u32.to_le_bytes() || id <= last {
+                    return Err(CheckpointError::Corrupt);
+                }
+                last = id;
+            }
+            document
+                .scene
+                .apply(records)
+                .map_err(CheckpointError::InvalidScene)?;
+            document.scene.revision = revision;
+            initial.extend(records);
         }
         if r.at != r.bytes.len() {
             return Err(CheckpointError::Corrupt);
@@ -455,10 +498,10 @@ mod tests {
             Err(CheckpointError::Corrupt)
         ));
         let mut b = bytes.clone();
-        b[8..12].copy_from_slice(&7u32.to_le_bytes());
+        b[8..12].copy_from_slice(&8u32.to_le_bytes());
         assert!(matches!(
             Document::from_checkpoint(&b),
-            Err(CheckpointError::UnsupportedVersion(7))
+            Err(CheckpointError::UnsupportedVersion(8))
         ));
         let mut b = bytes.clone();
         b[36..44].copy_from_slice(&u64::MAX.to_le_bytes());

@@ -1,5 +1,7 @@
 # Plane／Sphere subdivisions
 
+> 現行の保存形式はv7／hash v3。以下のv6／hash v2の記録は分割導入時点の仕様。[asset参照・移行](assets.md)。
+
 2026-10-17。🟢 [Done] 任意の整数分割（範囲内）、共有mesh・差分draw、保存v6／旧形式読込。
 
 ## APIと範囲
@@ -54,19 +56,20 @@ seam位置を一致させ、極の退化triangleを生成しない。外向きCC
 Planeの最大index数は393,216、Sphereは391,680。
 
 RendererはGeometrySpecごとにmeshを共有し、参照がなくなったcustom meshを次のScene更新で解放する。
-activeなspecが増えるとGPUメモリも増える。resource budgetはまだ設けていない。
+custom meshは[byte／件数budget](mesh-budget.md)で制限する。上限超過specは同kindの既定meshを使い、Rust側で理由を照会できる。
 既存の3形状Instance bank・差分copy・gather・計画／GPU索引cacheは維持する。
 
-bank内のspec配列と連続区間の境界を持ち、dirty slot・swap-remove・appendだけを更新する。
-同じkindの分割だけを変えた場合、bankの索引構成revisionは変えない。
-新しいtagを1 Instanceへ送信し、draw区間を更新する。全bank更新時のgather計画とGPU索引も再利用できる。
+bank内でGeometrySpecごとにInstance索引を連続配置し、active spec数だけdrawする。
+通常のTransform／RGB編集はdirty slotのみ処理し、bank索引revisionを維持する。
+追加・削除・kind／spec交換時は、同じspecの末尾と後続specの境界slotを局所交換する。
+全bankのsortは行わない（[計測と契約](local-spec-packing.md)）。
+移動したslotは差分転送し、索引が変わったbankのgather計画・GPU索引を再生成する。
+単一specなら元Instance bufferから直接描画する。既定3形状だけなら最大3 draws。
+[現在の実装・比較と制限](spec-batching.md)。
 
-単一specなら元Instance bufferから直接描画する。
-単一kindでも複数specがある場合はbank経路を使い、swap-remove後のbank順序とdraw区間を一致させる。
-既定3形状だけなら最大3 drawsを維持する。
-custom specが交互に並ぶ場合はdraw区間がInstance数まで増え得る。
-
-🟠 [Next] custom spec別batching、resource budget／generation handles。
+🟢 [Done] 構成編集時の局所再配置。
+🟢 [Done] custom mesh resource budget。
+🟠 [Next] generation handles。
 
 ## 保存・hash・旧binary
 
@@ -92,7 +95,7 @@ JS 13件、Clippy全target／feature、format、diff whitespace検査も成功�
 - canonical flags、上下限・不正値拒否、f32 tagの正確なroundtrip。
 - 分割だけの編集が1 dirty range、local／world再計算ゼロ。hash・checkpoint・Undo／Redo、v5読込と不正v5分割拒否。
 - 最小／非対称／既定／最大分割の頂点・index範囲・triangle数・非退化／外向きwinding、Sphereのradius、u32が必要なindex。
-- 300回のspec交換、dirty draw区間、shrink、単一kind内の異なるspecとbank順序。分割変更時にgather構成revision・GPU索引を維持。
+- 300回のspec交換、dirty draw区間、shrink、単一kind内の異なるspecとbank順序。索引変更時のgather cache無効化、通常編集時のcache維持。
 - v5移行後のPlane 7×9→Sphere 256×256、末尾全切断位置・破損から最後の正常な編集へ復旧、再起動再送、Undo／Redo、保存／再起動。
 - JSのconstructor・wire flags・immutable分割数、geometry交換の1 record・idleなし、不正分割の拒否、明示既定値の旧flags維持。
 
@@ -106,9 +109,9 @@ cargo test -p threex-renderer native_gpu_pipeline_and_draw -- --ignored --nocapt
 WASM／browserのビルド・表示は未検証。CPU描画計画・topology・WGSL validationを実機検証の代替とは扱わない。
 
 English: Plane and Sphere accept bounded integer subdivisions with immutable parameters. Shared spec meshes
-and incremental draw runs preserve the existing upload/gather caches; large meshes use Uint32 indices.
+and spec-grouped banks preserve incremental uploads with revision-aware gather caches; large meshes use Uint32 indices.
 Storage v6 reads v1–5, while default wire/tag/hash values remain unchanged. GPU presentation is pending.
 
-简体中文：Plane与Sphere支持范围内的整数分段和不可变参数。按spec共享mesh并更新差分绘制区间，
+简体中文：Plane与Sphere支持范围内的整数分段和不可变参数。按spec共享mesh并分组绘制，
 保留原有上传／gather缓存，大mesh使用Uint32索引。保存格式v6读取v1–5，默认命令／tag／hash不变。
 实际GPU显示验证待完成。

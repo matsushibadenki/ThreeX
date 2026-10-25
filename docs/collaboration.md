@@ -363,3 +363,104 @@ ThreeXは既存のXY Plane・unit radius=1 Sphere・外向きwindingを保持し
 
 シンボリックリンクへのimport／include／Cargo path／実行時依存は追加していない。
 [仕様と検証境界](subdivisions.md)。
+
+## Custom spec batching
+
+2026-10-22。Universal-3Dのrenderer.rsにあるcube／sphere／plane別Batchと共有vertex bufferを再確認した。
+ThreeXは3種類のGPU bankを維持し、その内部の索引をGeometrySpecごとにまとめる。
+相手の固定形状batchを直接取り込まず、任意分割と既存の差分転送・gather cacheに合わせて実装した。
+
+- 🟢 [Done] active specごとのdraw、移動slotの差分転送、索引変更に応じたcache無効化。
+- 🟠 [Next] 構成編集時の再配置コスト削減、resource budget／generation handles。
+- ⭕️ [Pending] 実GPU・WASM／browserの描画と性能。
+
+シンボリックリンクへのimport／include／Cargo path／実行時依存は追加していない。
+[計測と検証](spec-batching.md)。
+
+## Custom specの局所再配置
+
+Universal-3Dのrenderer.rsの固定3種類Batch・共有geometryを再確認した。
+ThreeXは3 bankを保持したまま、任意specの連続groupを境界slotの交換で維持する。
+相手の固定形状buffer実装やデータ形式は直接流用していない。
+
+- 🟢 [Done] 全bank sortを除去し、追加・削除・spec交換の差分copyとgather cacheを維持。
+- 🟠 [Next] resource budget／generation handles。
+- ⭕️ [Pending] 実GPU／WASM表示・GPU性能。
+
+シンボリックリンクへのimport／include／Cargo path／実行時依存は追加していない。
+[局所再配置の比較・検証](local-spec-packing.md)。
+
+## Custom mesh resource budget
+
+Universal-3Dのrenderer.rsにある固定3種類Batchとgeometry cache、Instance差分更新を再確認した。
+ThreeXは既定3形状を常駐させ、任意分割のcustom meshだけをbyte／件数budgetで管理する。
+相手の固定geometry cacheを直接取り込まず、active specの保持と同kind既定meshへのfallbackを実装した。
+
+- 🟢 [Done] 超過理由の照会、不要meshを新規生成前に解放、resident再利用・解放容量の再利用。
+- 🟢 [Done] budget変更をScene／Instance bank／gather cacheから独立させる。
+- 🟠 [Next] generation resource handles。
+- ⭕️ [Pending] 実GPU解放・再生成・fallback描画、WASM／browser。
+
+リンク先へのimport／include／Cargo path／実行時依存は追加していない。
+[budgetの契約と検証](mesh-budget.md)。
+
+## G01-A：generation付きmesh handle
+
+Universal-3DのGpuSceneの固定3形状Batch・mesh map・差分Instance cacheの境界を再確認した。
+ThreeXではcustom mesh mapに一時handleを保持し、pool epoch＋slot＋generationを検証してbufferを参照する。
+共通poolはpending予約の取消と遅延／二重結果の拒否も提供する。
+
+- 🟢 [Done] slot再利用・別pool／Renderer・epoch交換・generation枯渇・budget退避後の失効。
+- 🟢 [Done] mesh budget・局所再配置・gather cacheを維持。
+- 🟠 [Next] 永続asset ID／revisionとDocument・worker・保存形式の接続（G01-B）。
+- ⭕️ [Pending] 実GPU上のhandle失効・再生成・複数surface表示。
+
+シンボリックリンクへのbuild／実行時依存は追加していない。
+[契約と検証](resource-handles.md)。
+
+## G01-B：永続asset参照とworker
+
+Universal-3Dのmesh::Source.revision・GpuScene.meshesを参照した。ThreeXはsource文字列と分け、
+AssetId／整数revision／期待hashをDocumentの取引・history・checkpoint／journal v7へ保存する。
+
+- 🟢 [Done] asset参照の復元、hash v3、永続receiptによるrestart再送、workerの有界ticket・guard接続。
+- 🟢 [Done] 古い結果・Undo／Redo ABA・再起動・二重完了・hash不一致の拒否、差分Instance転送0。
+- 🟠 [Next] G02：実asset page／粗いLOD／pool。
+- ⭕️ [Pending] 実asset bytesの検算・GPU描画・WASM／他OS。
+
+相手の型・保存形式へのimport／include／Cargo path／実行時依存は追加していない。
+[仕様・検証境界](assets.md)。
+
+## G02-A：asset pageと粗いLOD
+
+Universal-3Dのmesh入力検証・MAX_TRIANGLES・共有BatchとSource.revisionを参照した。
+ThreeXは全triangle常駐を採用せず、最大1MiBの検証付きpage・root／detail・固定容量poolへ分離した。
+
+- 🟢 [Done] manifest／payload hash・seek/read、容量超過／失敗fallback、遅延結果拒否。
+- 🟢 [Done] Rendererのproxy／root／detail経路、primitive除外、疎なasset layout stamp、既存gather維持。
+- 🟠 [Next] G02-Bのnative host loader dispatch・完了配送・redraw。
+- ⭕️ [Pending] 実GPUでのpage表示・readback・解放、WASM／browser。
+
+相手の型・保存形式へのimport／include／Cargo path／実行時依存は追加していない。
+[形式・API・制限・検証](asset-pages.md)。
+
+## G02-B：native loader配送・surface／redraw
+
+2026-10-25。Universal-3Dのmain.rsの非同期終了・lock順序とrenderer共有meshを参照した。
+ThreeXはDocumentを複製せず、専用2 threadと8 leaseでreadを分離し、完了を順序付きworkerへ戻す。
+
+- 🟢 [Done] root→detail配送、8MiB入力payload予約、I/O停止中の編集・終了drain。
+- 🟢 [Done] Document／surface世代・段階の検証、古い結果拒否、target別on-demand redraw。
+- 🟠 [Next] G03-A：CPU可視判定・LOD選択。
+- ⭕️ [Pending] 実GPU／Wry・他OSでのupload・表示・終了。
+
+相手の型・保存形式・import／Cargo path／実行時依存は追加していない。
+[接続・上限・テスト](native-asset-loader.md)。
+
+## G03-A CPU view selection (2026-10-25)
+
+Universal-3Dのobject bounds・camera framing・shearの保守的stretch処理を読み取り参照。ThreeXは独立したclip-space AABB／SSEとinstance単位のhysteresisをRendererへ接続した。共有コードやsymlink依存は追加しない。[仕様と検証](cpu-lod.md)。
+
+English: Independent CPU asset visibility/LOD selection preserves the page fallback and gather cache; Universal-3D remains a read-only architectural reference.
+
+简体中文：独立实现CPU可见性／LOD选择，保留page fallback和gather缓存；Universal-3D仅作为只读架构参考，不添加符号链接依赖。

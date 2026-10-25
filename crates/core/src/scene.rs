@@ -31,6 +31,7 @@ pub struct Scene {
     stats: UpdateStats,
     identity: Arc<()>,
     journal: InstanceJournal,
+    asset_layout_revision: u64,
 }
 pub(crate) struct SceneEdit {
     changes: BTreeMap<u32, Option<Object>>,
@@ -105,6 +106,18 @@ impl Scene {
         &self.packed
     }
     /// Dense render indices are transient, never entity identifiers or draw-order keys.
+    /// Sparse asset references in packed render order lookup; no all-Object scan.
+    pub fn asset_instances(&self) -> impl Iterator<Item = (crate::AssetRef, usize)> + '_ {
+        self.store.assets.iter().filter_map(|(&slot, &reference)| {
+            self.store.packed_indices[slot].map(|index| (reference, index))
+        })
+    }
+    pub fn asset_layout_stamp(&self) -> SceneStamp {
+        SceneStamp {
+            identity: self.identity.clone(),
+            revision: self.asset_layout_revision,
+        }
+    }
     pub fn instance_index(&self, id: u32) -> Option<usize> {
         self.indices
             .get(&id)
@@ -173,6 +186,11 @@ impl Scene {
                     current.ok_or("Unknown entity")?;
                     changes.insert(id, None);
                     structural = true;
+                }
+                4 | 5 => {
+                    let mut o = current.ok_or("Unknown entity")?;
+                    o.asset = crate::assets::decode(c)?;
+                    changes.insert(id, Some(o));
                 }
                 _ => return Err("Unknown opcode".into()),
             }
@@ -267,11 +285,13 @@ impl Scene {
         let mut seeds = Vec::new();
         let mut instance_changes = InstanceChanges::new(false);
         let mut changed = false;
+        let mut asset_changed = false;
         for (id, value) in changes {
             let old = self.object(id);
             if old == value {
                 continue;
             }
+            asset_changed |= old.and_then(|o| o.asset) != value.and_then(|o| o.asset);
             changed = true;
             match value {
                 None => {
@@ -300,7 +320,13 @@ impl Scene {
                         self.store.locals[slot] = local(&o);
                         self.stats.local_transforms += 1;
                     }
-                    let flags = INSTANCE
+                    let instance_dirty = old.is_none_or(|old| {
+                        old.color != o.color
+                            || old.mesh != o.mesh
+                            || old.geometry != o.geometry
+                            || old.segments != o.segments
+                    });
+                    let flags = if instance_dirty { INSTANCE } else { 0 }
                         | if local_dirty || parent_dirty {
                             WORLD
                         } else {
@@ -392,6 +418,16 @@ impl Scene {
         for slot in touched {
             self.store.dirty[slot] = 0;
         }
+        if asset_changed
+            || self.stats.instance_additions != 0
+            || self.stats.instance_removals != 0
+            || self.stats.instance_moves != 0
+        {
+            self.asset_layout_revision = self
+                .asset_layout_revision
+                .checked_add(1)
+                .expect("asset layout exhausted");
+        }
         self.revision += 1;
         self.journal.record(self.revision, instance_changes);
     }
@@ -439,6 +475,9 @@ impl Scene {
         touched: &mut Vec<usize>,
         queue: &mut Vec<(usize, u8)>,
     ) {
+        if flags == 0 {
+            return;
+        }
         let old = self.store.dirty[slot];
         if old == 0 {
             touched.push(slot);

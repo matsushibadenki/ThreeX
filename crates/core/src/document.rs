@@ -132,11 +132,15 @@ impl Document {
         }
         let mut before = BTreeMap::new();
         let mut exists = BTreeMap::new();
+        let mut asset_touched = std::collections::BTreeSet::new();
         for c in commands.as_chunks::<64>().0 {
             let op = u32::from_le_bytes(c[..4].try_into().unwrap());
             let id = u32::from_le_bytes(c[4..8].try_into().unwrap());
             before.entry(id).or_insert_with(|| self.scene.object(id));
             let present = exists.entry(id).or_insert(before[&id].is_some());
+            if op == 4 || op == 5 {
+                asset_touched.insert(id);
+            }
             match op {
                 1 => *present = true,
                 3 => *present = false,
@@ -147,10 +151,12 @@ impl Document {
         // Scene validates the final hierarchy, so restored parents need not be emitted first.
         for (&id, &old) in &before {
             match (old, exists[&id]) {
-                (Some(object), true) => inverse.extend(record(2, id, object)),
+                (Some(object), true) => {
+                    inverse.extend(restore_record(id, object, asset_touched.contains(&id)))
+                }
                 (Some(object), false) => {
                     inverse.extend(record(1, id, object));
-                    inverse.extend(record(2, id, object));
+                    inverse.extend(restore_record(id, object, asset_touched.contains(&id)));
                 }
                 (None, true) => inverse.extend(record(3, id, Object::default())),
                 (None, false) => {}
@@ -306,6 +312,13 @@ pub struct DocumentSnapshot {
     pub revision: u64,
     pub objects: BTreeMap<u32, Object>,
 }
+fn restore_record(id: u32, object: Object, asset_touched: bool) -> Vec<u8> {
+    let mut bytes = record(2, id, object).to_vec();
+    if asset_touched || object.asset.is_some() {
+        bytes.extend(crate::asset_command(id, object.asset));
+    }
+    bytes
+}
 pub(crate) fn record(op: u32, id: u32, o: Object) -> [u8; 64] {
     let mut b = [0; 64];
     for (at, value) in [(0, op), (4, id), (56, o.flags()), (60, o.parent)] {
@@ -366,11 +379,15 @@ impl<'a> CommitGroupBuilder<'a> {
         };
         let mut before = BTreeMap::new();
         let mut exists = BTreeMap::new();
+        let mut asset_touched = std::collections::BTreeSet::new();
         for c in bytes.as_chunks::<64>().0 {
             let op = u32::from_le_bytes(c[..4].try_into().unwrap());
             let id = u32::from_le_bytes(c[4..8].try_into().unwrap());
             before.entry(id).or_insert_with(|| lookup(id));
             let present = exists.entry(id).or_insert(before[&id].is_some());
+            if op == 4 || op == 5 {
+                asset_touched.insert(id);
+            }
             match op {
                 1 => *present = true,
                 3 => *present = false,
@@ -380,10 +397,12 @@ impl<'a> CommitGroupBuilder<'a> {
         let mut inverse = Vec::new();
         for (&id, &old) in &before {
             match (old, exists[&id]) {
-                (Some(o), true) => inverse.extend(record(2, id, o)),
+                (Some(o), true) => {
+                    inverse.extend(restore_record(id, o, asset_touched.contains(&id)))
+                }
                 (Some(o), false) => {
                     inverse.extend(record(1, id, o));
-                    inverse.extend(record(2, id, o));
+                    inverse.extend(restore_record(id, o, asset_touched.contains(&id)));
                 }
                 (None, true) => inverse.extend(record(3, id, Object::default())),
                 (None, false) => {}

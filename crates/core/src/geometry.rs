@@ -207,7 +207,7 @@ mod tests {
         );
         assert_ne!(restored.content_hash(), hash);
         let bytes = restored.checkpoint().unwrap();
-        assert_eq!(&bytes[8..12], &6u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
         assert!(Document::from_checkpoint(&version(bytes.clone(), 5)).is_err());
         let mut reopened = Document::from_checkpoint(&bytes).unwrap();
         assert_eq!(reopened.scene().object(1).unwrap().segments, [7, 9]);
