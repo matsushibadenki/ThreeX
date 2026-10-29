@@ -1,6 +1,9 @@
 //! Retained scene database. Commands are little-endian fixed 64-byte records.
 pub mod asset_pages;
 mod assets;
+pub mod cluster_builder;
+pub mod lod_hierarchy;
+pub mod simplify;
 pub mod visibility;
 pub use assets::{AssetJobGuard, AssetRef, asset_command};
 pub use request::AssetId;

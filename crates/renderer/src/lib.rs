@@ -1,4 +1,5 @@
 pub mod cpu_lod;
+mod spatial;
 use cpu_lod::{CpuLodPlanner, CpuLodPolicy, CpuLodStats, InvalidLodPolicy, LodView};
 pub mod asset_pages;
 pub mod batching;
@@ -542,7 +543,11 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.instances.slice(..));
             for draw in &self.cpu_lod.draws {
                 let (manifest, proxy) = &self.asset_manifests[&draw.reference];
-                let selected = self.asset_pages.select(manifest, draw.want_detail);
+                let selected = self.asset_pages.select_hierarchy(
+                    manifest,
+                    self.cpu_lod.hierarchy(draw.reference),
+                    draw.want_detail,
+                );
                 let mesh = selected
                     .handle
                     .and_then(|h| self.asset_pages.get(h))

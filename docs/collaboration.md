@@ -464,3 +464,23 @@ Universal-3Dのobject bounds・camera framing・shearの保守的stretch処理�
 English: Independent CPU asset visibility/LOD selection preserves the page fallback and gather cache; Universal-3D remains a read-only architectural reference.
 
 简体中文：独立实现CPU可见性／LOD选择，保留page fallback和gather缓存；Universal-3D仅作为只读架构参考，不添加符号链接依赖。
+
+## MuTracerの設計参照
+
+MuTracerは一時配置された読み取り専用の設計参考。コード・shader・テスト・生成物・assetを流用せず、削除後もビルド・実行・テストできる境界を維持する。[参考点と独立実装の方針](mutracer-reference.md)を記録した。Universal-3Dとの既存の協調方針とG03-Bの優先順位は維持する。
+
+## G03-B1：独立した階層
+
+Universal-3Dのworld bounds・shear処理を読み取り確認し、ThreeXにasset内coverage treeと独立したinstance空間階層を実装。[仕様・検証と残作業](hierarchies.md)。MuTracerからは責務分離の設計観点だけを参考にし、コード・shader・テストを流用していない。どちらの参照ディレクトリにも依存しない。
+
+English: Independent asset/instance hierarchies preserve fallback and sparse GPU updates; no reference code or local-directory dependency is used.
+
+简体中文：独立实现asset／instance层级，保留fallback和局部GPU更新，不复用参考项目代码，也不依赖参考目录。
+
+## G03-B2a：親geometryの独立生成
+
+Universal-3Dのworld bounds／shear契約を再確認。ThreeXに境界固定のendpoint縮約、元surface全体への対応からの誤差上限、元triangleを直接使う親生成を独立実装した。[仕様・検証](parent-simplification.md)。MuTracerのコード・shader・テスト・生成物を流用せず、両参照ディレクトリに依存しない。既存のcoverage・fallback・差分転送・gather索引を維持する。
+
+English: Independent boundary-locked parent simplification preserves the Rust ownership and existing incremental renderer contracts. No reference code or directory dependency is used.
+
+简体中文：独立实现固定边界的父级简化，保留Rust所有权、coverage和局部更新契约，不复用参考代码，也不依赖参考目录。

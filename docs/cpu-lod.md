@@ -1,5 +1,7 @@
 # G03-A: CPU bounds and screen-space LOD
 
+現在は[G03-B1の独立した階層](hierarchies.md)を接続し、instance空間階層で候補を絞ってから以下のlocal bounds／SSE判定を行う。不可視なdirty instanceはbounds_testsが0になる場合がある。
+
 🟢 [Done] Registered asset instances use CPU frustum rejection and screen-space error (SSE) to choose G02 root/detail pages. `Renderer::set_cpu_lod_policy` controls the pixel threshold (default 2), hysteresis ratio (default 0.2), and frustum rejection. `cpu_lod_status` reports candidates, visible/culled instances, detail demand, bounds tests and draw ranges. These are runtime view settings; Document, checkpoint v7, journal v7 and protocol v1 are unchanged.
 
 ## 判定と描画

@@ -160,3 +160,5 @@ Camera contracts, Rust computation and pending WASM verification: [docs/camera.m
 [Minimal asset pages, coarse LOD and bounded residency](docs/asset-pages.md): verified Rust seek/read and Renderer APIs; [native loader dispatch and target-specific redraw](docs/native-asset-loader.md) are implemented, GPU display verification is Pending.
 
 [CPU bounds/frustum and screen-space LOD selection](docs/cpu-lod.md): per-instance hysteresis, root/proxy fallback, sparse bounds updates and resident gather index reuse are implemented. Hierarchical traversal follows in G03-B; actual GPU verification remains Pending.
+
+[Independent asset and instance hierarchies](docs/hierarchies.md): exact cluster partitioning, atomic coverage cuts and sparse instance bounds refits; [boundary-preserving parent generation](docs/parent-simplification.md) is implemented. Multilevel page persistence and background generation remain G03-B2b.

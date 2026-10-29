@@ -36,7 +36,9 @@
 - 🟢 [Done] G02-A：最小asset page形式・root／detail LOD・固定容量pool、Rust Renderer接続（asset-pages.md）。
 - 🟢 [Done] G02-B：native専用2 thread／8 lease loader、完了配送・surface世代guard・対象別redraw（native-asset-loader.md）。
 - 🟢 [Done] G03-AのCPU bounds／frustum判定・LOD選択（[詳細](cpu-lod.md)）。
-- 🟠 [Next] G03-Bの空間階層・多階層LOD builder。camera view offset／film設定などの互換API。
+- 🟢 [Done] G03-B1のinstance空間階層・asset coverage階層・正確なcluster分割（[詳細](hierarchies.md)）。
+- 🟢 [Done] G03-B2aの境界保持簡略化と保守的error評価（[詳細](parent-simplification.md)）。
+- 🟠 [Next] G03-B2bの多段page接続とbackground builder。camera view offset／film設定などの互換API。
 - ⭕️ [Pending] compute gatherの実GPU readback・性能・閾値調整。
 - 🟢 [Done] Release CPU scene benchmark at 100 / 1k / 10k / 100k objects, before/after CSV.
 - 🔴 [Later] GPU Scene／compute cullingと10万cube比較：巨大geometry計画G03／G04の後、G05で実装・比較。
@@ -137,13 +139,18 @@ Universal-3Dとは固定形状bank・共有geometry・差分更新の責務を�
 ### G03：階層LOD builder・空間階層・CPU可視選択
 
 🟢 [Done] G03-A：G02のbounds／root・detailを使うCPU参照版のfrustum判定・LOD選択。instance単位のhysteresis、root／proxy fallback、疎な再判定とgather cache維持を実装（[詳細](cpu-lod.md)）。
-🟠 [Next] G03-B：多階層cluster builder、境界保持・coverageを含む階層選択へ拡張する。
+🟢 [Done] G03-B1：asset内coverage階層・正確なcluster分割builder・instance空間階層と差分refit。現行root／detail Rendererへ接続（[仕様・検証](hierarchies.md)）。
+🟢 [Done] G03-B2a：境界保持の親geometry簡略化と保守的error評価、node error envelopeとexisting pageへのroundtrip回帰（[仕様・検証](parent-simplification.md)）。
+🟠 [Next] G03-B2b：多段page形式／loader／GPU接続と有界background builder／cache。G03-B全体は未完了。
 
-- 🟠 [Next] G03-B：オフラインbuilderで空間的に近いtriangleをcluster化し、簡略化した親を持つLOD階層を生成する。
+- 🟢 [Done] G03-B1：元頂点を変更しないcluster分割と複数段coverage treeのCPU選択、容量不足／子欠落時の親維持。
+- 🟢 [Done] G03-B2a：境界vertex／edgeを固定したendpoint縮約、元surface全体への対応に基づく誤差上限、各親を元triangleから直接生成。
+- 🟠 [Next] G03-B2b：生成した多段pageの保存・配送へ接続する。
 - 原形のbounding volumeと簡略化誤差を保持し、画面上の誤差を基準に親／子を選ぶ。
 - 🟢 [Done] G03-A：既存のbounds／root・detailでCPU frustum判定・screen-space errorの選択を実装。hierarchy traversalはG03-Bで拡張する。
 - ⭕️ [Pending] 実GPU画像のclip境界・LOD poppingとMacBook Air性能。Metal adapter NotFoundのためCPU検証と区別する。
-- 毎frameの全Object／全cluster走査を避け、階層node単位で不可視な領域をまとめて除外する。
+- 🟢 [Done] 登録asset instanceの階層node単位の不可視除外とdirty leaf祖先のみのrefit。camera変更時のmetadata走査・draw plan再構築はO(instance数)で残る。
+- 🟠 [Next] instance階層の訪問budget・再平衡と、asset内clusterの階層描画へ拡張する。
 - 各枝は親または必要な子の集合で面を覆う。子が揃う前に親を消して穴を作らない。
 - cluster境界の亀裂、異なるLOD間の継ぎ目、急な詳細度切替を検証し、境界保持とhysteresisを導入する。
 - viewごとのnode訪問数・cluster数・triangle数・request数に上限を設け、打ち切り時は親へ戻す。
@@ -268,8 +275,8 @@ MacBook Air实机帧时间、内存压力、持续负载和GPU正确性在完成
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust core: 63 passed; storage: 71 passed; renderer: 39 passed; Tauri host: 18 passed in debug and release. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
-- Current native suite: 191 passed in debug and release; JS: 13 passed.
+- Rust core: 72 passed; storage: 71 passed; renderer: 43 passed; Tauri host: 18 passed in debug and release. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
+- Current native suite: 204 passed in debug and release; JS: 13 passed.
 - JS compatibility tests: 13 passed.
 - Native GPU pipeline / gather readback tests: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.
@@ -370,3 +377,10 @@ Group commit仕様・計測・制約：four/group-commit-performance.md。
 - 🟢 [Done] Box・混在形状の差分描画計画、形状のみの更新・history・末尾復旧・再送、writer unlockの回帰検証。
 - ⭕️ [Pending] 3形状の実GPU／WASM表示。Metal adapter取得不可。
 仕様・制約：[geometry.md](geometry.md)。
+
+## MuTracerの設計参照
+
+- 🟢 [Done] 一時配置されたMuTracerの設計資料を確認し、[設計参考方針](mutracer-reference.md)を記録。コード・shader・テスト・生成物・assetは流用せず、配置ディレクトリへの依存も追加しない。
+- 🟠 [Next] G03-Bでasset内LOD階層とinstance空間階層、boundsの差分更新、有界background builderを独立設計する。レイ探索用BVHをLOD階層としてそのまま扱わない。
+- 🔴 [Later] G04／G06／G07で構築cache・品質制御・局所編集の設計参考にする。既存の差分更新・gather cache・root／proxy fallbackは維持する。
+- ⭕️ [Pending] 同条件の実GPU描画・性能比較。今回MuTracerのビルド・実行・性能測定は行っていない。

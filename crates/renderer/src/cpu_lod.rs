@@ -1,6 +1,10 @@
 //! CPU asset bounds/LOD reference. No Instance snapshots, residency mutation or GPU index writes.
-use crate::asset_pages::AssetDrawLayout;
+use crate::{
+    asset_pages::AssetDrawLayout,
+    spatial::{SpatialIndex, world_bounds},
+};
 use std::{collections::BTreeMap, ops::Range};
+use threex_core::lod_hierarchy::LodHierarchy;
 use threex_core::{
     AssetRef, Instance,
     asset_pages::AssetManifest,
@@ -43,6 +47,7 @@ pub struct CpuLodStats {
     pub detail_wanted: usize,
     pub bounds_tests: usize,
     pub draw_ranges: usize,
+    pub spatial_nodes: usize,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct LodView {
@@ -76,8 +81,13 @@ pub(crate) struct CpuLodPlanner {
     key: Option<ViewKey>,
     pub draws: Vec<AssetLodDraw>,
     stats: CpuLodStats,
+    spatial: SpatialIndex,
+    hierarchies: BTreeMap<AssetRef, LodHierarchy>,
 }
 impl CpuLodPlanner {
+    pub fn hierarchy(&self, reference: AssetRef) -> &LodHierarchy {
+        &self.hierarchies[&reference]
+    }
     pub fn status(&self) -> CpuLodStats {
         self.stats
     }
@@ -132,18 +142,53 @@ impl CpuLodPlanner {
             keys
         };
         let camera = BoundsView::new(&view.vp, view.width, view.height);
-        self.stats.bounds_tests = dirty.len();
+        if layout_changed {
+            self.hierarchies.clear();
+            let mut items = Vec::with_capacity(self.entries.len());
+            for (&source, e) in &self.entries {
+                let m = manifest(e.reference);
+                self.hierarchies
+                    .entry(e.reference)
+                    .or_insert_with(|| LodHierarchy::from_manifest(m));
+                items.push((source, world_bounds(m.bounds(), &data[source as usize])));
+            }
+            self.spatial.rebuild(items);
+        } else {
+            // Only dirty source bounds refit their ancestor paths; camera changes do not refit.
+            for range in changes {
+                for (&source, e) in self.entries.range(range.start as u32..range.end as u32) {
+                    self.spatial.refit(
+                        source,
+                        world_bounds(manifest(e.reference).bounds(), &data[source as usize]),
+                    );
+                }
+            }
+        }
+        let query = if view_changed || layout_changed || !changes.is_empty() {
+            Some(self.spatial.query(if policy.frustum_culling {
+                camera.as_ref()
+            } else {
+                None
+            }))
+        } else {
+            None
+        };
+        self.stats.spatial_nodes = query.as_ref().map_or(0, |q| q.visited);
+        self.stats.bounds_tests = 0;
         for source in dirty {
             let e = self.entries.get_mut(&source).unwrap();
             let m = manifest(e.reference);
+            if query.as_ref().is_some_and(|q| !q.visible.contains(&source)) {
+                plan_changed |= !e.culled;
+                e.culled = true;
+                continue;
+            }
+            self.stats.bounds_tests += 1;
+            let root = &self.hierarchies[&e.reference].nodes()[0];
             let assessment = camera
                 .as_ref()
                 .map_or_else(BoundsAssessment::uncertain, |v| {
-                    v.assess(
-                        m.bounds(),
-                        &data[source as usize].model,
-                        m.page(0).unwrap().error,
-                    )
+                    v.assess(root.bounds, &data[source as usize].model, root.error)
                 });
             let culled =
                 policy.frustum_culling && assessment.visibility == BoundsVisibility::Outside;
@@ -167,7 +212,9 @@ impl CpuLodPlanner {
             return;
         }
         let tests = self.stats.bounds_tests;
+        let spatial_nodes = self.stats.spatial_nodes;
         self.stats = CpuLodStats {
+            spatial_nodes,
             candidates: self.entries.len(),
             bounds_tests: tests,
             ..Default::default()
@@ -255,7 +302,7 @@ mod tests {
             false,
             std::slice::from_ref(&(0..1)),
         );
-        assert_eq!(planner.status().bounds_tests, 1);
+        assert_eq!(planner.status().bounds_tests, 0);
         assert_eq!(planner.status().culled, 1);
         assert!(planner.draws.is_empty());
         assert!(!layout.excluded.iter().all(|e| e.is_empty()));
@@ -286,6 +333,17 @@ mod tests {
         disabled.policy.frustum_culling = false;
         planner.sync(&data, &layout, false, &[], disabled, |_| &m);
         assert_eq!(planner.status().visible, 1);
+        data[0].model[3][0] = 0.;
+        run(
+            &mut planner,
+            &data,
+            100,
+            false,
+            std::slice::from_ref(&(0..1)),
+        );
+        assert_eq!(planner.status().visible, 1);
+        assert_eq!(planner.status().bounds_tests, 1);
+        assert_eq!(batches.revision(0), revision);
     }
     #[test]
     fn policy_rejects_nonfinite_and_unstable_thresholds() {
@@ -330,7 +388,11 @@ mod tests {
         assert!(!planner.draws[0].want_detail);
         assert!(planner.draws[1].want_detail);
         let mut pool = PagePool::new(168, 2);
-        assert_eq!(pool.select(&m, true).lod, Lod::BoundsProxy);
+        assert_eq!(
+            pool.select_hierarchy(&m, planner.hierarchy(m.reference()), true)
+                .lod,
+            Lod::BoundsProxy
+        );
         let PageAdmission::Load(root) = pool.begin(&d, 1, &m, 0).unwrap() else {
             panic!()
         };
@@ -344,10 +406,18 @@ mod tests {
         let PageAdmission::Load(detail) = pool.begin(&d, 1, &m, 1).unwrap() else {
             panic!()
         };
-        assert_eq!(pool.select(&m, true).lod, Lod::Root);
+        assert_eq!(
+            pool.select_hierarchy(&m, planner.hierarchy(m.reference()), true)
+                .lod,
+            Lod::Root
+        );
         pool.complete(&d, detail, Err(PageFailure::ReadFailed), |p| p)
             .unwrap_err();
-        assert_eq!(pool.select(&m, true).lod, Lod::Root);
+        assert_eq!(
+            pool.select_hierarchy(&m, planner.hierarchy(m.reference()), true)
+                .lod,
+            Lod::Root
+        );
         let PageAdmission::Load(detail) = pool.begin(&d, 1, &m, 1).unwrap() else {
             panic!()
         };
@@ -360,7 +430,8 @@ mod tests {
         .unwrap();
         for draw in &planner.draws {
             assert_eq!(
-                pool.select(&m, draw.want_detail).lod,
+                pool.select_hierarchy(&m, planner.hierarchy(m.reference()), draw.want_detail)
+                    .lod,
                 if draw.want_detail {
                     Lod::Detail
                 } else {

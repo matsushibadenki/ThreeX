@@ -227,6 +227,36 @@ impl<T> PagePool<T> {
         true
     }
     /// Detail is a whole-asset replacement. Root stays pinned until the asset is explicitly released.
+    pub(crate) fn select_hierarchy(
+        &self,
+        manifest: &AssetManifest,
+        hierarchy: &threex_core::lod_hierarchy::LodHierarchy,
+        want_detail: bool,
+    ) -> PageSelection {
+        let node = hierarchy.select_one(
+            3,
+            |_, _| want_detail,
+            |page| {
+                u8::try_from(page)
+                    .ok()
+                    .is_some_and(|level| self.ready.contains_key(&(manifest.reference(), level)))
+            },
+        );
+        let level = node.map(|n| hierarchy.nodes()[n].page as u8);
+        PageSelection {
+            lod: match level {
+                Some(1) => Lod::Detail,
+                Some(0) => Lod::Root,
+                _ => Lod::BoundsProxy,
+            },
+            handle: level.and_then(|level| {
+                self.ready
+                    .get(&(manifest.reference(), level))
+                    .map(|r| r.handle)
+            }),
+            bounds: manifest.bounds(),
+        }
+    }
     pub fn select(&self, manifest: &AssetManifest, want_detail: bool) -> PageSelection {
         for (level, lod) in [(1, Lod::Detail), (0, Lod::Root)] {
             if level == 1 && !want_detail {
@@ -780,5 +810,193 @@ impl AssetDrawLayout {
         }
         self.key = Some(key);
         true
+    }
+}
+
+#[cfg(test)]
+mod generated_parent_tests {
+    use super::*;
+    use crate::{
+        batching::GeometryBatches,
+        gather::{PlanCache, Prepared},
+    };
+    use threex_core::{
+        AssetId,
+        asset_pages::{DESCRIPTOR_BYTES, HEADER_BYTES, PageDescriptor, page_hash},
+        cluster_builder::{ClusterBudget, ParentGeometryBudget, SimplifiedClusters},
+        lod_hierarchy::LodHierarchy,
+        simplify::SimplifyBudget,
+    };
+    #[test]
+    fn generated_parent_roundtrip_keeps_fallback_sparse_uploads_and_resident_gather_indices() {
+        let vertices = [
+            [-0.5, -0.5, 0.],
+            [0.5, -0.5, 0.],
+            [0.5, 0.5, 0.],
+            [-0.5, 0.5, 0.],
+            [0., 0., 0.1],
+        ];
+        let triangles = [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]];
+        let parents = SimplifiedClusters::build(
+            &vertices,
+            &triangles,
+            &[],
+            ClusterBudget {
+                leaf_triangles: 2,
+                max_triangles: 4,
+                max_nodes: 3,
+            },
+            ParentGeometryBudget {
+                simplify: SimplifyBudget {
+                    target_triangles: 2,
+                    max_error: 1.,
+                    max_attempts: 32,
+                    max_input_triangles: 4,
+                },
+                max_source_vertices: 5,
+                max_stored_triangles: 8,
+                max_total_attempts: 32,
+            },
+        )
+        .unwrap();
+        assert_eq!(parents.meshes[0].triangles.len(), 2);
+        let payload: Vec<Vec<u8>> = [parents.meshes[0].triangles.as_slice(), triangles.as_slice()]
+            .into_iter()
+            .map(|triangles| {
+                let mut bytes = Vec::new();
+                for v in &vertices {
+                    for x in v {
+                        bytes.extend(x.to_le_bytes());
+                    }
+                }
+                for t in triangles {
+                    for i in t {
+                        bytes.extend(i.to_le_bytes());
+                    }
+                }
+                bytes
+            })
+            .collect();
+        let mut offset = (HEADER_BYTES + 2 * DESCRIPTOR_BYTES) as u64;
+        let pages: Vec<_> = (0..2)
+            .map(|i| {
+                let p = PageDescriptor {
+                    offset,
+                    length: payload[i].len() as u64,
+                    vertices: 5,
+                    indices: if i == 0 { 6 } else { 12 },
+                    error: if i == 0 {
+                        parents.hierarchy.nodes()[0].error
+                    } else {
+                        0.
+                    },
+                    hash: page_hash(&payload[i]),
+                };
+                offset += p.length;
+                p
+            })
+            .collect();
+        let (reference, encoded) = AssetManifest::encode(
+            AssetId::from_bytes([25; 16]).unwrap(),
+            1,
+            parents.hierarchy.nodes()[0].bounds,
+            offset,
+            &pages,
+        )
+        .unwrap();
+        let manifest = AssetManifest::decode(&encoded, reference).unwrap();
+        let hierarchy = LodHierarchy::from_manifest(&manifest);
+        let document = tests::document(reference);
+        let mut data = vec![document.scene().instances()[0]; 1200];
+        for (i, item) in data.iter_mut().enumerate() {
+            item.color[3] = (1 + i % 3) as f32;
+        }
+        let mut batches = GeometryBatches::default();
+        batches.sync(&data, std::iter::once(0..data.len()));
+        let revision = batches.revision(0);
+        let mut cache = PlanCache::default();
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: 2560,
+            ..Default::default()
+        };
+        assert!(matches!(
+            cache.prepare(&limits, [100000, 100000], &batches, 0, true),
+            Prepared::Gather { upload: true, .. }
+        ));
+        let mut pool = PagePool::new(offset, 2);
+        assert_eq!(
+            pool.select_hierarchy(&manifest, &hierarchy, true).lod,
+            Lod::BoundsProxy
+        );
+        let PageAdmission::Load(root) = pool.begin(&document, 1, &manifest, 0).unwrap() else {
+            panic!()
+        };
+        pool.complete(
+            &document,
+            root,
+            Ok(manifest.decode_page(0, payload[0].clone()).unwrap()),
+            |p| p,
+        )
+        .unwrap();
+        assert_eq!(
+            pool.select_hierarchy(&manifest, &hierarchy, true).lod,
+            Lod::Root
+        );
+        let PageAdmission::Load(detail) = pool.begin(&document, 1, &manifest, 1).unwrap() else {
+            panic!()
+        };
+        pool.complete(&document, detail, Err(PageFailure::ReadFailed), |p| p)
+            .unwrap_err();
+        assert_eq!(
+            pool.select_hierarchy(&manifest, &hierarchy, true).lod,
+            Lod::Root
+        );
+        let PageAdmission::Load(detail) = pool.begin(&document, 1, &manifest, 1).unwrap() else {
+            panic!()
+        };
+        pool.complete(
+            &document,
+            detail,
+            Ok(manifest.decode_page(1, payload[1].clone()).unwrap()),
+            |p| p,
+        )
+        .unwrap();
+        assert_eq!(
+            pool.select_hierarchy(&manifest, &hierarchy, true).lod,
+            Lod::Detail
+        );
+        assert_eq!(
+            pool.select_hierarchy(&manifest, &hierarchy, false).lod,
+            Lod::Root
+        );
+        pool.evict_detail(reference);
+        assert_eq!(
+            pool.select_hierarchy(&manifest, &hierarchy, true).lod,
+            Lod::Root
+        );
+        batches.sync(&data, std::iter::empty());
+        assert_eq!(batches.transfer_count(0, false), 0);
+        assert!(matches!(
+            cache.prepare(&limits, [100000, 100000], &batches, 0, true),
+            Prepared::Gather { upload: false, .. }
+        ));
+        data[0].color[0] = 0.25;
+        batches.sync(&data, std::iter::once(0..1));
+        assert_eq!(batches.revision(0), revision);
+        assert_eq!(batches.transfer_count(0, false), 1);
+        assert!(matches!(
+            cache.prepare(&limits, [100000, 100000], &batches, 0, true),
+            Prepared::Gather { upload: false, .. }
+        ));
+        pool.release_asset(reference);
+        assert_eq!(
+            pool.select_hierarchy(&manifest, &hierarchy, true).lod,
+            Lod::BoundsProxy
+        );
+        let mut empty = PagePool::<ValidatedPage>::new(0, 0);
+        assert_eq!(
+            empty.begin(&document, 1, &manifest, 0),
+            Err(PageFailure::Capacity)
+        );
     }
 }
