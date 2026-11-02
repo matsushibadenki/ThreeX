@@ -1,6 +1,8 @@
 //! Native persistence host. Document format lives in core; filesystem stays here.
 mod asset_loader;
 pub mod asset_pages;
+pub mod hierarchy_asset;
+pub mod hierarchy_builder;
 pub use asset_loader::{
     ASSET_LOAD_CAPACITY, ASSET_LOAD_THREADS, AssetLoadStatus, AssetLoaderStats,
 };

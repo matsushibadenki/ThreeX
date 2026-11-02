@@ -23,6 +23,7 @@ pub enum AssetLoadStatus {
 pub struct AssetLoaderStats {
     pub pending: usize,
     pub reserved_payload_bytes: u64,
+    pub reserved_manifest_bytes: u64,
     pub queued: u64,
     pub completed: u64,
     pub failed: u64,
@@ -33,6 +34,8 @@ impl AssetLoaderStats {
     pub(crate) fn pending(&mut self, count: usize) {
         self.pending = count;
         self.reserved_payload_bytes = count as u64 * MAX_PAGE_BYTES;
+        self.reserved_manifest_bytes =
+            count as u64 * threex_core::hierarchy_asset::MAX_MANIFEST_BYTES as u64;
     }
 }
 pub(crate) struct Loaded {
@@ -40,11 +43,29 @@ pub(crate) struct Loaded {
     pub page: Result<ValidatedPage, PageFailure>,
 }
 pub(crate) trait PageSource: Send + Sync {
-    fn read(&self, path: &Path, reference: AssetRef, level: u8) -> Loaded;
+    fn read(&self, path: &Path, reference: AssetRef, level: u32) -> Loaded;
+    fn read_known(
+        &self,
+        path: &Path,
+        reference: AssetRef,
+        level: u32,
+        _known: Option<&AssetManifest>,
+    ) -> Loaded {
+        self.read(path, reference, level)
+    }
 }
 pub(crate) struct DiskSource;
 impl PageSource for DiskSource {
-    fn read(&self, path: &Path, reference: AssetRef, level: u8) -> Loaded {
+    fn read(&self, path: &Path, reference: AssetRef, level: u32) -> Loaded {
+        self.read_known(path, reference, level, None)
+    }
+    fn read_known(
+        &self,
+        path: &Path,
+        reference: AssetRef,
+        level: u32,
+        known: Option<&AssetManifest>,
+    ) -> Loaded {
         // Normal assets are regular files; do not intentionally open a pipe/device as an asset.
         if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
             return Loaded {
@@ -52,7 +73,10 @@ impl PageSource for DiskSource {
                 page: Err(PageFailure::ReadFailed),
             };
         }
-        match crate::asset_pages::AssetReader::open(path, reference) {
+        match known.map_or_else(
+            || crate::asset_pages::AssetReader::open(path, reference),
+            |m| crate::asset_pages::AssetReader::open_known(path, reference, m.clone()),
+        ) {
             Err(_) => Loaded {
                 manifest: None,
                 page: Err(PageFailure::ReadFailed),
@@ -68,11 +92,12 @@ pub(crate) struct Task {
     pub ticket: ResourceHandle,
     pub path: PathBuf,
     pub reference: AssetRef,
-    pub level: u8,
+    pub level: u32,
+    pub manifest: Option<Arc<AssetManifest>>,
 }
 pub(crate) struct Completion {
     pub ticket: ResourceHandle,
-    pub level: u8,
+    pub level: u32,
     pub loaded: Loaded,
 }
 pub(crate) struct Loader {
@@ -101,7 +126,12 @@ impl Loader {
                         };
                         let Ok(task) = task else { break };
                         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            source.read(&task.path, task.reference, task.level)
+                            source.read_known(
+                                &task.path,
+                                task.reference,
+                                task.level,
+                                task.manifest.as_deref(),
+                            )
                         }))
                         .unwrap_or(Loaded {
                             manifest: None,

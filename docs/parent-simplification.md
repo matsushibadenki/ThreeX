@@ -2,7 +2,13 @@
 
 🟢 [Done] `threex_core::simplify::simplify`による境界保持のedge縮約と保守的error評価、`cluster_builder::SimplifiedClusters::build`による親geometry生成。
 
-🟠 [Next] G03-B2b：多段page形式・loader・GPU接続、有界background builder／cache。今回の生成APIは明示呼び出しのoffline Rust APIで、Document worker／Rendererから自動実行しない。
+🟢 [Done] G03-B2b1：[多段page保存・有界読み込み](hierarchy-asset-format.md)。
+
+🟢 [Done] G03-B2b2：[有界worker／GPUコード接続](native-hierarchy-delivery.md)。実GPU検証はPending。
+
+🟢 [Done] G03-B2b3：[background builder／生成結果cache](background-hierarchy-builder.md)。
+
+🟠 [Next] view全体の訪問budget・詳細LOD履歴／cut cache。今回の生成APIは明示呼び出しのoffline Rust APIで、Document worker／Rendererから自動実行しない。
 
 ## 使用と制限
 
@@ -34,7 +40,7 @@
 
 ## 互換性と検証
 
-既存のcoverage treeの原子的な親→子置換、PagePoolのroot／proxy fallback、Document所有とstale job拒否は維持する。THREEXA1、checkpoint／journal v7、request protocolは変更しない。生成親を既存のroot、元meshをdetailとしてencode／decodeし、既存のCPU residency選択を通す回帰テストを追加した。多段pageの永続化・配送はまだ接続していない。
+既存のcoverage treeの原子的な親→子置換、PagePoolのroot／proxy fallback、Document所有とstale job拒否は維持する。THREEXA1、checkpoint／journal v7、request protocolは変更しない。生成親を既存のroot、元meshをdetailとしてencode／decodeし、既存のCPU residency選択を通す回帰テストを追加した。THREEXA2の[保存・有界読み込みAPI](hierarchy-asset-format.md)を追加した。[worker／GPUコード](native-hierarchy-delivery.md)にも接続した。実GPU検証はPending。
 
 CPUテストで以下を確認する。
 
@@ -52,6 +58,6 @@ CPUテストで以下を確認する。
 
 Universal-3Dのworld bounds／shear契約を再確認し、Rust側所有と既存の変換・差分経路を維持した。MuTracerはasset／instance責務分離の設計参考に留め、コード・shader・テストを流用せず独立実装した。両参照ディレクトリへのbuild・実行・テスト依存は追加していない。
 
-English: Boundary-locked endpoint contraction generates parent geometry with a conservative bidirectional surface-distance bound derived from a simplicial vertex correspondence. Each parent is generated directly from its original patch; hierarchy errors form a monotone envelope. Unsafe or constrained reductions retain exact geometry. Coverage, existing page fallback, sparse transfers and gather indices remain intact. Multilevel persistence/delivery and background generation remain G03-B2b; GPU validation is Pending.
+English: Boundary-locked endpoint contraction generates parent geometry with a conservative bidirectional surface-distance bound derived from a simplicial vertex correspondence. Each parent is generated directly from its original patch; hierarchy errors form a monotone envelope. Unsafe or constrained reductions retain exact geometry. Coverage, existing page fallback, sparse transfers and gather indices remain intact. Multilevel persistence APIs are implemented; worker/GPU code is connected and bounded background generation and its session cache are implemented; GPU validation is Pending.
 
-简体中文：已独立实现固定边界的端点收缩和父级geometry生成。通过顶点对应的分片线性映射计算保守的双向表面距离上限；每个父级直接来自原始patch，层级error保持单调。无法安全简化时保留精确geometry。保留coverage、page fallback、局部传输和gather索引缓存。多层page保存／配送与后台生成仍属于G03-B2b，实机GPU验证保持Pending。
+简体中文：已独立实现固定边界的端点收缩和父级geometry生成。通过顶点对应的分片线性映射计算保守的双向表面距离上限；每个父级直接来自原始patch，层级error保持单调。无法安全简化时保留精确geometry。保留coverage、page fallback、局部传输和gather索引缓存。已实现多层page保存API；已连接worker／GPU代码，已实现有界后台生成与session cache，实机GPU验证保持Pending。

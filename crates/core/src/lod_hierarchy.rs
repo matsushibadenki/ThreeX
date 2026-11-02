@@ -55,6 +55,9 @@ impl LodHierarchy {
         Ok(Self { nodes })
     }
     pub fn from_manifest(m: &AssetManifest) -> Self {
+        if let Some(h) = m.hierarchy() {
+            return h.clone();
+        }
         let mut nodes = vec![LodNode {
             bounds: m.bounds(),
             error: m.page(0).unwrap().error,

@@ -191,6 +191,58 @@ impl SimplifiedClusters {
     }
 }
 
+/// Bump when parent generation semantics change independently of the file codec.
+pub const PARENT_BUILDER_VERSION: u32 = 1;
+/// Compute off the Document/UI thread. Exact source bits and every setting are
+/// part of the key; an AssetRef alone is not a geometry-content certificate.
+pub fn generation_key(
+    reference: crate::AssetRef,
+    vertices: &[[f32; 3]],
+    triangles: &[[u32; 3]],
+    locks: &[u32],
+    cluster: ClusterBudget,
+    parent: ParentGeometryBudget,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"ThreeX-parent-builder");
+    hash.update(PARENT_BUILDER_VERSION.to_le_bytes());
+    hash.update(reference.id().bytes());
+    hash.update(reference.revision().to_le_bytes());
+    hash.update(reference.hash());
+    for n in [
+        vertices.len(),
+        triangles.len(),
+        locks.len(),
+        cluster.leaf_triangles,
+        cluster.max_triangles,
+        cluster.max_nodes,
+        parent.simplify.target_triangles,
+        parent.simplify.max_attempts,
+        parent.simplify.max_input_triangles,
+        parent.max_source_vertices,
+        parent.max_stored_triangles,
+        parent.max_total_attempts,
+    ] {
+        hash.update((n as u64).to_le_bytes());
+    }
+    hash.update(parent.simplify.max_error.to_bits().to_le_bytes());
+    for v in vertices {
+        for x in v {
+            hash.update(x.to_bits().to_le_bytes());
+        }
+    }
+    for t in triangles {
+        for i in t {
+            hash.update(i.to_le_bytes());
+        }
+    }
+    for i in locks {
+        hash.update(i.to_le_bytes());
+    }
+    hash.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

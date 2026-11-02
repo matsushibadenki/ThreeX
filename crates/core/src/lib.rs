@@ -2,6 +2,7 @@
 pub mod asset_pages;
 mod assets;
 pub mod cluster_builder;
+pub mod hierarchy_asset;
 pub mod lod_hierarchy;
 pub mod simplify;
 pub mod visibility;

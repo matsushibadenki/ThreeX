@@ -38,7 +38,10 @@
 - 🟢 [Done] G03-AのCPU bounds／frustum判定・LOD選択（[詳細](cpu-lod.md)）。
 - 🟢 [Done] G03-B1のinstance空間階層・asset coverage階層・正確なcluster分割（[詳細](hierarchies.md)）。
 - 🟢 [Done] G03-B2aの境界保持簡略化と保守的error評価（[詳細](parent-simplification.md)）。
-- 🟠 [Next] G03-B2bの多段page接続とbackground builder。camera view offset／film設定などの互換API。
+- 🟢 [Done] G03-B2b1の多段page保存と有界読み込み（[詳細](hierarchy-asset-format.md)）。
+- 🟢 [Done] G03-B2b2のworker／GPUコード接続（[詳細](native-hierarchy-delivery.md)）。
+- 🟢 [Done] G03-B2b3のbackground builder／生成結果cache（[詳細](background-hierarchy-builder.md)）。
+- 🟠 [Next] view全体の階層budget・詳細LOD履歴／cut cache。camera view offset／film設定などの互換API。
 - ⭕️ [Pending] compute gatherの実GPU readback・性能・閾値調整。
 - 🟢 [Done] Release CPU scene benchmark at 100 / 1k / 10k / 100k objects, before/after CSV.
 - 🔴 [Later] GPU Scene／compute cullingと10万cube比較：巨大geometry計画G03／G04の後、G05で実装・比較。
@@ -141,11 +144,17 @@ Universal-3Dとは固定形状bank・共有geometry・差分更新の責務を�
 🟢 [Done] G03-A：G02のbounds／root・detailを使うCPU参照版のfrustum判定・LOD選択。instance単位のhysteresis、root／proxy fallback、疎な再判定とgather cache維持を実装（[詳細](cpu-lod.md)）。
 🟢 [Done] G03-B1：asset内coverage階層・正確なcluster分割builder・instance空間階層と差分refit。現行root／detail Rendererへ接続（[仕様・検証](hierarchies.md)）。
 🟢 [Done] G03-B2a：境界保持の親geometry簡略化と保守的error評価、node error envelopeとexisting pageへのroundtrip回帰（[仕様・検証](parent-simplification.md)）。
-🟠 [Next] G03-B2b：多段page形式／loader／GPU接続と有界background builder／cache。G03-B全体は未完了。
+🟢 [Done] G03-B2b1：THREEXA2の多段page形式・親geometryのpage化・immutable保存・有界seek/read（[仕様・検証](hierarchy-asset-format.md)）。
+🟢 [Done] G03-B2b2：v2の有界worker配送・lease内metadata共有・resident cut／GPU drawコード接続（[仕様・検証](native-hierarchy-delivery.md)）。
+🟢 [Done] G03-B2b3：専用CPU lane、admission／生成／disk LRU上限、guard付き反映と耐久出力（[仕様・検証](background-hierarchy-builder.md)）。
+🟠 [Next] view全体の訪問budget・詳細LOD履歴／cut cache。G03全体は未完了。
+🔴 [Later] 永続cache indexとクラッシュ残骸の回収。
 
 - 🟢 [Done] G03-B1：元頂点を変更しないcluster分割と複数段coverage treeのCPU選択、容量不足／子欠落時の親維持。
 - 🟢 [Done] G03-B2a：境界vertex／edgeを固定したendpoint縮約、元surface全体への対応に基づく誤差上限、各親を元triangleから直接生成。
-- 🟠 [Next] G03-B2b：生成した多段pageの保存・配送へ接続する。
+- 🟢 [Done] G03-B2b1：生成した多段pageの保存・再読込、参照／hash／階層検証と宛先上書き拒否。
+- 🟢 [Done] G03-B2b2：幅優先配送で粗いcoverageを先に完成させ、部分常駐時は親を維持。page到着でもInstance／gatherを再送しない。
+- ⭕️ [Pending] 接続したv2 GPU drawの実GPU検証（Metal adapter NotFound）。
 - 原形のbounding volumeと簡略化誤差を保持し、画面上の誤差を基準に親／子を選ぶ。
 - 🟢 [Done] G03-A：既存のbounds／root・detailでCPU frustum判定・screen-space errorの選択を実装。hierarchy traversalはG03-Bで拡張する。
 - ⭕️ [Pending] 実GPU画像のclip境界・LOD poppingとMacBook Air性能。Metal adapter NotFoundのためCPU検証と区別する。
@@ -275,8 +284,8 @@ MacBook Air实机帧时间、内存压力、持续负载和GPU正确性在完成
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust core: 72 passed; storage: 71 passed; renderer: 43 passed; Tauri host: 18 passed in debug and release. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
-- Current native suite: 204 passed in debug and release; JS: 13 passed.
+- Rust core: 75 passed; storage: 84 passed; renderer: 44 passed; Tauri host: 18 passed in debug and release. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
+- Current native suite: 221 passed in debug and release; JS: 13 passed.
 - JS compatibility tests: 13 passed.
 - Native GPU pipeline / gather readback tests: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.

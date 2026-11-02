@@ -108,7 +108,7 @@ impl Gate {
 }
 struct GatedSource(Arc<Gate>);
 impl PageSource for GatedSource {
-    fn read(&self, path: &Path, reference: AssetRef, level: u8) -> Loaded {
+    fn read(&self, path: &Path, reference: AssetRef, level: u32) -> Loaded {
         {
             let mut s = self.0.state.lock().unwrap();
             s.started += 1;
@@ -130,10 +130,12 @@ impl PageSource for GatedSource {
         result
     }
 }
+type CutLog = Arc<Mutex<Vec<(u32, Vec<u32>)>>>;
 struct Backend {
     pool: PagePool<ValidatedPage>,
     manifests: BTreeMap<AssetRef, AssetManifest>,
     log: Arc<Mutex<Vec<Lod>>>,
+    cuts: Option<CutLog>,
 }
 impl SurfaceBackend for Backend {
     fn configure(&mut self, _w: u32, _h: u32) -> Result<(), SurfaceFailure> {
@@ -151,7 +153,7 @@ impl SurfaceBackend for Backend {
         d: &Document,
         entity: u32,
         m: AssetManifest,
-        level: u8,
+        level: u32,
         page: Result<ValidatedPage, PageFailure>,
     ) -> Result<AssetDelivery, SurfaceFailure> {
         assert_eq!(std::thread::current().name(), Some("threex-document"));
@@ -165,6 +167,14 @@ impl SurfaceBackend for Backend {
             }),
             Err(e) => Err(e),
         };
+        if let Some(cuts) = &self.cuts {
+            let selected = self.pool.select_cut(&m, Default::default(), |_, _| true);
+            let ids = selected
+                .iter()
+                .filter_map(|s| s.handle.and_then(|h| self.pool.get(h)).map(|p| p.level()))
+                .collect();
+            cuts.lock().unwrap().push((level, ids));
+        }
         self.log
             .lock()
             .unwrap()
@@ -180,6 +190,7 @@ fn backend(bytes: u64, log: Arc<Mutex<Vec<Lod>>>) -> Box<dyn SurfaceBackend> {
     Box::new(Backend {
         pool: PagePool::new(bytes, 16),
         manifests: BTreeMap::new(),
+        cuts: None,
         log,
     })
 }
@@ -480,4 +491,242 @@ fn root_then_detail_automatically_continue_under_one_lease_and_skip_closed_surfa
     assert_eq!(stats.reserved_payload_bytes, 0);
     assert_eq!(*log.lock().unwrap(), vec![Lod::Root, Lod::Detail]);
     worker.shutdown().unwrap();
+}
+
+fn hierarchy_fixture(path: &Path) -> AssetRef {
+    use threex_core::{
+        cluster_builder::{ClusterBudget, ParentGeometryBudget, SimplifiedClusters},
+        simplify::SimplifyBudget,
+    };
+    let v = [
+        [0., 0., 1.],
+        [0., 0., -1.],
+        [1., 0., 0.],
+        [0., 1., 0.],
+        [-1., 0., 0.],
+        [0., -1., 0.],
+    ];
+    let t = [
+        [0, 2, 3],
+        [0, 3, 4],
+        [0, 4, 5],
+        [0, 5, 2],
+        [1, 3, 2],
+        [1, 4, 3],
+        [1, 5, 4],
+        [1, 2, 5],
+    ];
+    let source = SimplifiedClusters::build(
+        &v,
+        &t,
+        &[],
+        ClusterBudget {
+            leaf_triangles: 2,
+            max_triangles: 8,
+            max_nodes: 7,
+        },
+        ParentGeometryBudget {
+            simplify: SimplifyBudget {
+                target_triangles: 4,
+                max_error: 2.,
+                max_attempts: 64,
+                max_input_triangles: 8,
+            },
+            max_source_vertices: 6,
+            max_stored_triangles: 24,
+            max_total_attempts: 64,
+        },
+    )
+    .unwrap();
+    crate::hierarchy_asset::write_hierarchy_asset(
+        path,
+        AssetId::from_bytes([82; 16]).unwrap(),
+        1,
+        &source,
+        1024 * 1024,
+    )
+    .unwrap()
+}
+struct RecordingSource(Arc<Mutex<Vec<(u32, bool)>>>);
+impl PageSource for RecordingSource {
+    fn read(&self, p: &Path, r: AssetRef, n: u32) -> Loaded {
+        self.read_known(p, r, n, None)
+    }
+    fn read_known(&self, p: &Path, r: AssetRef, n: u32, known: Option<&AssetManifest>) -> Loaded {
+        self.0.lock().unwrap().push((n, known.is_some()));
+        DiskSource.read_known(p, r, n, known)
+    }
+}
+#[test]
+fn hierarchy_breadth_first_delivery_reuses_metadata_and_keeps_partial_coverage() {
+    let t = Temp::new();
+    let path = t.0.join("hierarchy");
+    let reference = hierarchy_fixture(&path);
+    let surfaces = NativeSurfaces::default();
+    let cuts = Arc::new(Mutex::new(Vec::new()));
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let target = surfaces
+        .attach(
+            1,
+            Box::new(Backend {
+                pool: PagePool::new(1024 * 1024, 16),
+                manifests: BTreeMap::new(),
+                log: Arc::new(Mutex::new(Vec::new())),
+                cuts: Some(cuts.clone()),
+            }),
+            64,
+            64,
+        )
+        .unwrap();
+    let worker = JournalWorker::start_native(
+        DocumentStore::new(t.0.join("doc")),
+        WorkerConfig::default(),
+        surfaces,
+        Arc::new(RecordingSource(reads.clone())),
+    )
+    .unwrap();
+    let c = worker.client();
+    let mut next = 0;
+    bind(&c, &mut next, reference, 1);
+    assert_eq!(
+        load(&c, &mut next, target, 1, path, true).0,
+        AssetLoadStatus::Queued
+    );
+    let stats = idle(&c, &mut next);
+    assert_eq!(stats.completed, 7);
+    assert_eq!(stats.failed, 0);
+    assert_eq!(stats.queued, 1);
+    assert_eq!(stats.reserved_manifest_bytes, 0);
+    assert_eq!(
+        *reads.lock().unwrap(),
+        vec![
+            (0, false),
+            (1, true),
+            (4, true),
+            (2, true),
+            (3, true),
+            (5, true),
+            (6, true)
+        ]
+    );
+    assert_eq!(
+        *cuts.lock().unwrap(),
+        vec![
+            (0, vec![0]),
+            (1, vec![0]),
+            (4, vec![1, 4]),
+            (2, vec![1, 4]),
+            (3, vec![2, 3, 4]),
+            (5, vec![2, 3, 4]),
+            (6, vec![2, 3, 5, 6])
+        ]
+    );
+    worker.shutdown().unwrap();
+}
+#[test]
+fn hierarchy_undo_aba_rejects_old_root_then_restart_loads_current_reference() {
+    let t = Temp::new();
+    let path = t.0.join("hierarchy");
+    let reference = hierarchy_fixture(&path);
+    let gate = Arc::new(Gate::default());
+    let surfaces = NativeSurfaces::default();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let target = surfaces
+        .attach(1, backend(1024 * 1024, log.clone()), 64, 64)
+        .unwrap();
+    let worker = JournalWorker::start_native(
+        DocumentStore::new(t.0.join("doc")),
+        WorkerConfig::default(),
+        surfaces.clone(),
+        Arc::new(GatedSource(gate.clone())),
+    )
+    .unwrap();
+    let c = worker.client();
+    let mut next = 0;
+    bind(&c, &mut next, reference, 1);
+    load(&c, &mut next, target, 1, path.clone(), true);
+    gate.wait_started(1);
+    call(
+        &c,
+        &mut next,
+        WorkerAction::Commit {
+            expected_revision: 1,
+            commands: asset_command(1, None).to_vec(),
+        },
+    );
+    call(
+        &c,
+        &mut next,
+        WorkerAction::Undo {
+            expected_revision: 2,
+        },
+    );
+    gate.open();
+    assert_eq!(idle(&c, &mut next).stale, 1);
+    assert!(log.lock().unwrap().is_empty());
+    call(&c, &mut next, WorkerAction::Save);
+    worker.shutdown().unwrap();
+    let worker = JournalWorker::start_native(
+        DocumentStore::new(t.0.join("doc")),
+        WorkerConfig::default(),
+        surfaces,
+        Arc::new(DiskSource),
+    )
+    .unwrap();
+    let c = worker.client();
+    let mut next = 0;
+    load(&c, &mut next, target, 1, path, true);
+    assert_eq!(idle(&c, &mut next).completed, 7);
+    worker.shutdown().unwrap();
+}
+
+#[test]
+fn hierarchy_page_failure_and_capacity_stop_without_publishing_partial_children() {
+    use std::io::{Seek, SeekFrom, Write};
+    for mode in 0..3 {
+        let t = Temp::new();
+        let path = t.0.join("hierarchy");
+        let reference = hierarchy_fixture(&path);
+        let reader = crate::asset_pages::AssetReader::open(&path, reference).unwrap();
+        let root_bytes = reader.manifest().page(0).unwrap().length;
+        if mode == 2 {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(reader.manifest().page(1).unwrap().offset))
+                .unwrap();
+            file.write_all(&[0xff; 4]).unwrap();
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let surfaces = NativeSurfaces::default();
+        let bytes = match mode {
+            0 => 0,
+            1 => root_bytes,
+            _ => 1024 * 1024,
+        };
+        let target = surfaces
+            .attach(1, backend(bytes, log.clone()), 64, 64)
+            .unwrap();
+        let worker = JournalWorker::start_native(
+            DocumentStore::new(t.0.join("doc")),
+            WorkerConfig::default(),
+            surfaces,
+            Arc::new(DiskSource),
+        )
+        .unwrap();
+        let c = worker.client();
+        let mut next = 0;
+        bind(&c, &mut next, reference, 1);
+        load(&c, &mut next, target, 1, path, true);
+        let stats = idle(&c, &mut next);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.completed, if mode == 0 { 0 } else { 1 });
+        assert_eq!(stats.reserved_payload_bytes, 0);
+        assert_eq!(stats.reserved_manifest_bytes, 0);
+        assert!(log.lock().unwrap().iter().all(|&lod| lod
+            == if mode == 0 {
+                Lod::BoundsProxy
+            } else {
+                Lod::Root
+            }));
+        worker.shutdown().unwrap();
+    }
 }

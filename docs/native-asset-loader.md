@@ -133,3 +133,5 @@ leaves the worker; payloads remain in Rust/GPU ownership. MockRuntime and CPU te
 简体中文：G02-B将2个专用thread／8个lease的native loader接入Document worker、surface世代校验及目标window的redraw。
 先加载root再按需加载detail，detail失败时保留root。读取不阻塞编辑，取消输入在回收前仍占用staging额度。
 对外只返回小型受理／状态数据，payload保持在Rust／GPU侧。CPU及MockRuntime测试通过，实际GPU／Wry验证仍为Pending。
+
+THREEXA2の幅優先配送、lease内metadata再利用と階層cutの接続は[多段pageのnative配送](native-hierarchy-delivery.md)を参照。従来のv1 root／detail動作を維持して拡張している。

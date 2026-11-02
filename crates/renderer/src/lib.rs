@@ -72,6 +72,7 @@ pub struct Renderer {
     asset_views: asset_pages::AssetDrawLayout,
     cpu_lod: CpuLodPlanner,
     cpu_lod_policy: CpuLodPolicy,
+    hierarchy_cut_budget: asset_pages::HierarchyCutBudget,
     asset_page_budget: (u64, u32),
     asset_views_dirty: bool,
 
@@ -174,6 +175,7 @@ impl Renderer {
             asset_views: Default::default(),
             cpu_lod: Default::default(),
             cpu_lod_policy: Default::default(),
+            hierarchy_cut_budget: Default::default(),
             asset_page_budget: (64 * 1024 * 1024, 128),
             asset_views_dirty: false,
 
@@ -243,7 +245,7 @@ impl Renderer {
         document: &Document,
         entity: u32,
         manifest: AssetManifest,
-        level: u8,
+        level: u32,
     ) -> Result<PageAdmission, PageFailure> {
         let id = document
             .document_id()
@@ -313,6 +315,20 @@ impl Renderer {
                 count: page.indices(),
                 format: wgpu::IndexFormat::Uint32,
             })
+    }
+    pub fn set_hierarchy_cut_budget(
+        &mut self,
+        budget: asset_pages::HierarchyCutBudget,
+    ) -> Result<(), InvalidLodPolicy> {
+        if budget.max_visits == 0
+            || budget.max_draws == 0
+            || budget.max_visits > threex_core::hierarchy_asset::MAX_NODES
+            || budget.max_draws > threex_core::hierarchy_asset::MAX_NODES
+        {
+            return Err(InvalidLodPolicy);
+        }
+        self.hierarchy_cut_budget = budget;
+        Ok(())
     }
     pub fn set_cpu_lod_policy(&mut self, policy: CpuLodPolicy) -> Result<(), InvalidLodPolicy> {
         self.cpu_lod_policy = policy.validate()?;
@@ -541,8 +557,41 @@ impl Renderer {
                 }
             }
             pass.set_vertex_buffer(1, self.instances.slice(..));
+            let asset_camera = threex_core::visibility::BoundsView::new(vp, width, height);
             for draw in &self.cpu_lod.draws {
                 let (manifest, proxy) = &self.asset_manifests[&draw.reference];
+                if manifest.is_hierarchical() {
+                    for source in draw.range.clone() {
+                        let selected = self.asset_pages.select_cut(
+                            manifest,
+                            self.hierarchy_cut_budget,
+                            |i, node| {
+                                if i == 0 {
+                                    return draw.want_detail;
+                                }
+                                asset_camera.as_ref().is_none_or(|v| {
+                                    v.assess(
+                                        node.bounds,
+                                        &scene.instances()[source as usize].model,
+                                        node.error,
+                                    )
+                                    .error_pixels
+                                        > f64::from(self.cpu_lod_policy.max_error_pixels)
+                                })
+                            },
+                        );
+                        for selected in selected {
+                            let mesh = selected
+                                .handle
+                                .and_then(|h| self.asset_pages.get(h))
+                                .unwrap_or(proxy);
+                            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                            pass.set_index_buffer(mesh.indices.slice(..), mesh.format);
+                            pass.draw_indexed(0..mesh.count, 0, source..source + 1);
+                        }
+                    }
+                    continue;
+                }
                 let selected = self.asset_pages.select_hierarchy(
                     manifest,
                     self.cpu_lod.hierarchy(draw.reference),
@@ -825,6 +874,61 @@ mod tests {
                 &vp,
             );
             assert!(renderer.asset_views.draws.is_empty());
+            let (manifest, payload) = crate::asset_pages::hierarchy_tests::fixture();
+            let doc = crate::asset_pages::tests::document(manifest.reference());
+            renderer.set_asset_page_budget(1024 * 1024, 16);
+            for node in [0u32, 1, 4, 2, 3, 5, 6] {
+                let super::PageAdmission::Load(request) = renderer
+                    .request_asset_page(&doc, 1, manifest.clone(), node)
+                    .unwrap()
+                else {
+                    panic!()
+                };
+                renderer
+                    .complete_asset_page(
+                        &doc,
+                        request,
+                        Ok(manifest
+                            .decode_page(node, payload[node as usize].clone())
+                            .unwrap()),
+                    )
+                    .unwrap();
+                renderer.render(
+                    doc.scene(),
+                    &target.create_view(&Default::default()),
+                    32,
+                    32,
+                    &vp,
+                );
+            }
+            assert_eq!(
+                renderer
+                    .asset_pages
+                    .select_cut(&manifest, Default::default(), |_, _| true)
+                    .len(),
+                4
+            );
+            renderer
+                .set_hierarchy_cut_budget(super::asset_pages::HierarchyCutBudget {
+                    max_visits: 1,
+                    max_draws: 1,
+                })
+                .unwrap();
+            renderer.render(
+                doc.scene(),
+                &target.create_view(&Default::default()),
+                32,
+                32,
+                &vp,
+            );
+            renderer.evict_asset_detail(manifest.reference());
+            renderer.render(
+                doc.scene(),
+                &target.create_view(&Default::default()),
+                32,
+                32,
+                &vp,
+            );
             assert!(renderer.device.pop_error_scope().await.is_none());
         });
     }

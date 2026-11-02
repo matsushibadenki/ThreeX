@@ -80,7 +80,7 @@ pub trait SurfaceBackend: Send {
         _document: &Document,
         _entity: u32,
         _manifest: AssetManifest,
-        _level: u8,
+        _level: u32,
         _page: Result<ValidatedPage, PageFailure>,
     ) -> Result<AssetDelivery, SurfaceFailure> {
         Err(SurfaceFailure::Unavailable)
@@ -130,7 +130,7 @@ impl NativeSurfaces {
         handle: SurfaceHandle,
         entity: u32,
         manifest: AssetManifest,
-        level: u8,
+        level: u32,
         page: Result<ValidatedPage, PageFailure>,
     ) -> Result<AssetDelivery, SurfaceFailure> {
         let mut targets = self.0.lock().map_err(|_| SurfaceFailure::Poisoned)?;
@@ -397,7 +397,7 @@ impl SurfaceBackend for WgpuSurface {
         document: &Document,
         entity: u32,
         manifest: AssetManifest,
-        level: u8,
+        level: u32,
         page: Result<ValidatedPage, PageFailure>,
     ) -> Result<AssetDelivery, SurfaceFailure> {
         if self.lost.load(Ordering::Acquire) {

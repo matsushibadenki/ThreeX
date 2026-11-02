@@ -1,9 +1,12 @@
-//! Minimal uncompressed, two-level asset container. All lengths checked before allocation.
+//! Version-dispatched uncompressed asset metadata (v1 root/detail, v2 tree).
+//! All lengths are bounded before allocation.
 use crate::{AssetId, AssetRef};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 const MAGIC: &[u8; 8] = b"THREEXA1";
 pub const HEADER_BYTES: usize = 72;
 pub const DESCRIPTOR_BYTES: usize = 60;
+/// Maximum v1 encoder metadata size; use encoded_len for version-dispatched reads.
 pub const MAX_MANIFEST_BYTES: usize = HEADER_BYTES + 2 * DESCRIPTOR_BYTES;
 pub const MAX_PAGE_BYTES: u64 = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,7 +29,7 @@ pub struct PageDescriptor {
     pub hash: [u8; 32],
 }
 impl PageDescriptor {
-    fn size(&self) -> Result<usize, AssetPageError> {
+    pub(crate) fn size(&self) -> Result<usize, AssetPageError> {
         if self.vertices < 3 || self.indices < 3 || !self.indices.is_multiple_of(3) {
             return Err(AssetPageError::Geometry);
         }
@@ -45,12 +48,19 @@ pub struct AssetManifest {
     reference: AssetRef,
     bounds: [f32; 6],
     file_len: u64,
-    pages: Vec<PageDescriptor>,
+    pages: Arc<[PageDescriptor]>,
+    hierarchy: Option<Arc<crate::lod_hierarchy::LodHierarchy>>,
 }
 pub fn page_hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 impl AssetManifest {
+    pub fn is_hierarchical(&self) -> bool {
+        self.hierarchy.is_some()
+    }
+    pub fn hierarchy(&self) -> Option<&crate::lod_hierarchy::LodHierarchy> {
+        self.hierarchy.as_deref()
+    }
     pub fn reference(&self) -> AssetRef {
         self.reference
     }
@@ -60,16 +70,19 @@ impl AssetManifest {
     pub fn file_len(&self) -> u64 {
         self.file_len
     }
-    pub fn page(&self, level: u8) -> Option<PageDescriptor> {
+    pub fn page(&self, level: u32) -> Option<PageDescriptor> {
         self.pages.get(level as usize).copied()
     }
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
-    /// Validates the fixed header before a reader fetches at most 120 descriptor bytes.
+    /// Validate the fixed header before bounded v1/v2 metadata allocation.
     pub fn encoded_len(header: &[u8]) -> Result<usize, AssetPageError> {
         if header.len() != HEADER_BYTES {
             return Err(AssetPageError::Length);
+        }
+        if &header[..8] == b"THREEXA2" {
+            return crate::hierarchy_asset::HierarchyManifest::encoded_len(header);
         }
         if &header[..8] != MAGIC {
             return Err(if header[..7] == MAGIC[..7] {
@@ -89,6 +102,19 @@ impl AssetManifest {
     }
     pub fn decode(bytes: &[u8], expected: AssetRef) -> Result<Self, AssetPageError> {
         let header = bytes.get(..HEADER_BYTES).ok_or(AssetPageError::Length)?;
+        if &header[..8] == b"THREEXA2" {
+            let m = crate::hierarchy_asset::HierarchyManifest::decode(bytes, expected)?;
+            let pages = (0..m.hierarchy().nodes().len() as u32)
+                .map(|n| m.page(n).unwrap())
+                .collect();
+            return Ok(Self {
+                reference: expected,
+                bounds: m.hierarchy().nodes()[0].bounds,
+                file_len: m.file_len(),
+                pages,
+                hierarchy: Some(Arc::new(m.hierarchy().clone())),
+            });
+        }
         let size = Self::encoded_len(header)?;
         if bytes.len() != size {
             return Err(AssetPageError::Length);
@@ -143,7 +169,8 @@ impl AssetManifest {
             reference: expected,
             bounds,
             file_len,
-            pages,
+            pages: pages.into(),
+            hierarchy: None,
         })
     }
     /// Fixture/importer helper: serializes bounded metadata, not the entire asset file.
@@ -180,28 +207,15 @@ impl AssetManifest {
         Ok((reference, b))
     }
     /// Takes ownership of a single bounded input buffer; no whole-asset copy or expansion.
-    pub fn decode_page(&self, level: u8, bytes: Vec<u8>) -> Result<ValidatedPage, AssetPageError> {
+    pub fn decode_page(&self, level: u32, bytes: Vec<u8>) -> Result<ValidatedPage, AssetPageError> {
         let p = self.page(level).ok_or(AssetPageError::Format)?;
-        if bytes.len() != p.size()? {
-            return Err(AssetPageError::Length);
-        }
-        if page_hash(&bytes) != p.hash {
-            return Err(AssetPageError::Checksum);
-        }
-        let vertex_bytes = p.vertices as usize * 12;
-        for v in bytes[..vertex_bytes].as_chunks::<12>().0 {
-            for i in 0..3 {
-                let x = f32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
-                if !x.is_finite() || x < self.bounds[i] || x > self.bounds[i + 3] {
-                    return Err(AssetPageError::Bounds);
-                }
-            }
-        }
-        for b in bytes[vertex_bytes..].as_chunks::<4>().0 {
-            if u32::from_le_bytes(*b) >= p.vertices {
-                return Err(AssetPageError::Geometry);
-            }
-        }
+        validate_payload(
+            self.hierarchy
+                .as_ref()
+                .map_or(self.bounds, |h| h.nodes()[level as usize].bounds),
+            p,
+            &bytes,
+        )?;
         Ok(ValidatedPage {
             reference: self.reference,
             level,
@@ -211,10 +225,37 @@ impl AssetManifest {
         })
     }
 }
+pub(crate) fn validate_payload(
+    bounds: [f32; 6],
+    p: PageDescriptor,
+    bytes: &[u8],
+) -> Result<(), AssetPageError> {
+    if bytes.len() != p.size()? {
+        return Err(AssetPageError::Length);
+    }
+    if page_hash(bytes) != p.hash {
+        return Err(AssetPageError::Checksum);
+    }
+    let vertex_bytes = p.vertices as usize * 12;
+    for v in bytes[..vertex_bytes].as_chunks::<12>().0 {
+        for i in 0..3 {
+            let x = f32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
+            if !x.is_finite() || x < bounds[i] || x > bounds[i + 3] {
+                return Err(AssetPageError::Bounds);
+            }
+        }
+    }
+    for b in bytes[vertex_bytes..].as_chunks::<4>().0 {
+        if u32::from_le_bytes(*b) >= p.vertices {
+            return Err(AssetPageError::Geometry);
+        }
+    }
+    Ok(())
+}
 #[derive(Debug)]
 pub struct ValidatedPage {
     reference: AssetRef,
-    level: u8,
+    level: u32,
     bytes: Box<[u8]>,
     vertices: u32,
     indices: u32,
@@ -223,7 +264,7 @@ impl ValidatedPage {
     pub fn reference(&self) -> AssetRef {
         self.reference
     }
-    pub fn level(&self) -> u8 {
+    pub fn level(&self) -> u32 {
         self.level
     }
     pub fn byte_len(&self) -> u64 {
@@ -336,7 +377,7 @@ mod tests {
             assert!(manifest.decode_page(0, bytes).is_err());
         }
         let mut bad = manifest;
-        bad[7] = b'2';
+        bad[7] = b'3';
         assert!(matches!(
             AssetManifest::decode(&bad, reference),
             Err(AssetPageError::UnsupportedVersion)

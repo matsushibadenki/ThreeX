@@ -1022,7 +1022,7 @@ mod tests {
             document: &threex_core::Document,
             entity: u32,
             manifest: threex_core::asset_pages::AssetManifest,
-            _level: u8,
+            _level: u32,
             page: Result<
                 threex_core::asset_pages::ValidatedPage,
                 threex_renderer::asset_pages::PageFailure,

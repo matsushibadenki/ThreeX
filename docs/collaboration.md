@@ -484,3 +484,27 @@ Universal-3Dのworld bounds／shear契約を再確認。ThreeXに境界固定の
 English: Independent boundary-locked parent simplification preserves the Rust ownership and existing incremental renderer contracts. No reference code or directory dependency is used.
 
 简体中文：独立实现固定边界的父级简化，保留Rust所有权、coverage和局部更新契约，不复用参考代码，也不依赖参考目录。
+
+## G03-B2b1：多段page保存
+
+ThreeX固有のTHREEXA2とimmutable保存・有界読み込みを独立実装（[仕様・検証](hierarchy-asset-format.md)）。Universal-3DのRust所有境界、既存の差分描画・fallbackを維持する。MuTracerのコードは流用せず、両参照ディレクトリへの依存も追加しない。worker／GPU配送は次工程。
+
+English: Multilevel persistence is independent; existing Rust ownership and rendering contracts are unchanged. No reference code or directory dependency is used.
+
+简体中文：独立实现多层保存，保留Rust所有权和现有绘制契约，不复用参考代码，也不依赖参考目录。
+
+## G03-B2b2：多段pageの配送・描画接続
+
+THREEXA2を既存の有界loader・PagePool・Rust Rendererへ接続し、幅優先で粗いcoverageを先に完成させる。Universal-3Dの変換・Rust所有境界を維持し、MuTracerのコードは流用せず、両参照ディレクトリへの依存も追加しない。[仕様・検証](native-hierarchy-delivery.md)。
+
+English: Independent multilevel delivery preserves sparse instance/gather updates and stale-result rejection. Actual GPU verification remains Pending.
+
+简体中文：独立实现多层配送，保留局部instance／gather更新和过期结果拒绝，实机GPU验证保持Pending。
+
+## G03-B2b3：background生成とcache
+
+Document thread外の専用CPU laneと有界disk LRUを独立実装。開始時guardで旧結果のbindを拒否し、既存actorの期待revision／protocol再送重複排除を維持する。[仕様・検証](background-hierarchy-builder.md)。Universal-3DのRust所有境界を維持し、MuTracerのコード・shader・テストは流用せず、両参照directoryへ依存しない。
+
+English: Independent bounded generation preserves Rust ownership and durable replay semantics; no reference code or directory dependency is used.
+
+简体中文：独立实现有界生成，保留Rust所有权和持久再送去重，不复用参考代码，也不依赖参考目录。

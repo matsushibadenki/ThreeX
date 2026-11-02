@@ -4,7 +4,13 @@
 
 🟢 [Done] G03-B2a：[境界保持の親geometry簡略化と保守的error評価](parent-simplification.md)。
 
-🟠 [Next] G03-B2b：多段page形式・loader・GPU描画への接続、有界background builder／cache。G03-B全体の完了ではない。
+🟢 [Done] G03-B2b1：[多段page保存・有界読み込み](hierarchy-asset-format.md)。
+
+🟢 [Done] G03-B2b2：[有界worker／GPUコード接続](native-hierarchy-delivery.md)。実GPU検証はPending。
+
+🟢 [Done] G03-B2b3：[background builder／生成結果cache](background-hierarchy-builder.md)。
+
+🟠 [Next] view全体の訪問budget・詳細LOD履歴／cut cache。G03-B全体の完了ではない。
 
 ## Asset内の階層
 
@@ -32,7 +38,7 @@ dirty rangeに含まれるinstanceだけworld boundsを再計算し、leafから
 
 ## 互換性と検証
 
-CPU選択はInstanceのGPU配置を変更しない。既存のGeometryBatches・差分転送・gather索引cache・primitive除外を維持する。THREEXA1、checkpoint／journal v7、request protocolは変更しない。多段clusterの永続化・配送はまだ接続していない。現行loaderは引き続きroot／detailを配送し、再送重複排除・古いjob結果拒否を既存テストで確認する。
+CPU選択はInstanceのGPU配置を変更しない。既存のGeometryBatches・差分転送・gather索引cache・primitive除外を維持する。THREEXA1、checkpoint／journal v7、request protocolは変更しない。THREEXA2の[保存・有界読み込みAPI](hierarchy-asset-format.md)を追加し、[worker／GPUコード](native-hierarchy-delivery.md)にも接続した。実GPU検証はPending。現行loaderは引き続きroot／detailを配送し、再送重複排除・古いjob結果拒否を既存テストで確認する。
 
 CPUテスト：
 
@@ -48,6 +54,6 @@ Rust workspaceのdebug／releaseは各204 passed（core 72、renderer 43、stora
 
 MuTracerは共有geometry／instance階層の責務分離と背景準備の設計観点だけを参考にした。コード、shader、テスト、生成物は流用していない。Universal-3Dのworld boundsとshearの扱いを読み取り確認し、変換契約を維持する。どちらの参照ディレクトリもbuild・実行・テスト依存に含めない。
 
-English: Asset-local coverage trees and world-space instance trees are independent. Atomic resident-child replacement retains parent fallback under budget pressure. An exact cluster partitioner preserves original vertices; boundary-preserving parent simplification is implemented. Multilevel page persistence/delivery and background generation remain G03-B2b. Sparse refits and existing instance/gather caches are preserved. GPU validation remains Pending.
+English: Asset-local coverage trees and world-space instance trees are independent. Atomic resident-child replacement retains parent fallback under budget pressure. An exact cluster partitioner preserves original vertices; boundary-preserving parent simplification is implemented. Multilevel persistence APIs are implemented; worker/GPU code is connected and bounded background generation and its session cache are implemented. Sparse refits and existing instance/gather caches are preserved. GPU validation remains Pending.
 
-简体中文：asset内部覆盖层级与instance世界空间层级独立实现。只有所有子page可用且预算允许时才替换父节点。精确cluster分割保留原顶点；已实现固定边界的父级简化；多层page保存／配送与后台生成仍属于G03-B2b。保留局部refit、差分传输和gather缓存，实机GPU验证保持Pending。
+简体中文：asset内部覆盖层级与instance世界空间层级独立实现。只有所有子page可用且预算允许时才替换父节点。精确cluster分割保留原顶点；已实现固定边界的父级简化；已实现多层page保存API；已连接worker／GPU代码，已实现有界后台生成与session cache。保留局部refit、差分传输和gather缓存，实机GPU验证保持Pending。

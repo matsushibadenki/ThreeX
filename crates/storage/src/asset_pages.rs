@@ -42,6 +42,22 @@ impl AssetReader {
         }
         Ok(Self { file, manifest })
     }
+    /// Reuse authenticated metadata from the same bounded loader lease. Each
+    /// payload is still hashed and checked; no global path-based cache is used.
+    pub(crate) fn open_known(
+        path: &Path,
+        expected: AssetRef,
+        manifest: AssetManifest,
+    ) -> Result<Self, PageReadError> {
+        if manifest.reference() != expected {
+            return Err(AssetPageError::Format.into());
+        }
+        let file = File::open(path)?;
+        if file.metadata()?.len() != manifest.file_len() {
+            return Err(AssetPageError::Length.into());
+        }
+        Ok(Self { file, manifest })
+    }
     pub fn manifest(&self) -> &AssetManifest {
         &self.manifest
     }
@@ -55,7 +71,7 @@ impl AssetReader {
         }
         self.read_page(request.level())
     }
-    pub fn read_page(&mut self, level: u8) -> Result<ValidatedPage, PageReadError> {
+    pub fn read_page(&mut self, level: u32) -> Result<ValidatedPage, PageReadError> {
         let p = self.manifest.page(level).ok_or(AssetPageError::Format)?;
         // Manifest decode already bounded length to MAX_PAGE_BYTES (1 MiB).
         self.file.seek(SeekFrom::Start(p.offset))?;

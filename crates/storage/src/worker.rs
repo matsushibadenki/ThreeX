@@ -459,7 +459,8 @@ struct LoadJob {
     guard: threex_core::AssetJobGuard,
     target: threex_renderer::native::SurfaceHandle,
     path: std::path::PathBuf,
-    level: u8,
+    level: u32,
+    remaining: VecDeque<u32>,
     detail: bool,
     cancelled: bool,
 }
@@ -519,6 +520,7 @@ impl Service {
             path: path.to_owned(),
             reference: guard.reference(),
             level: 0,
+            manifest: None,
         };
         if self.loader.submit(task).is_err() {
             self.load_tickets.release(ticket);
@@ -539,6 +541,7 @@ impl Service {
                 target,
                 path: path.to_owned(),
                 level: 0,
+                remaining: VecDeque::new(),
                 detail,
                 cancelled: false,
             },
@@ -562,7 +565,22 @@ impl Service {
         if job.cancelled || !document.accepts_asset_result(&job.guard, job.guard.reference()) {
             self.load_stats.stale += 1;
         } else if let Some(manifest) = completion.loaded.manifest {
-            let has_detail = manifest.page(1).is_some();
+            if job.level == 0 && job.detail {
+                if let Some(h) = manifest.hierarchy() {
+                    let mut order: Vec<u32> =
+                        h.nodes()[0].children.iter().map(|&n| n as u32).collect();
+                    let mut at = 0;
+                    while at < order.len() {
+                        let n = order[at] as usize;
+                        order.extend(h.nodes()[n].children.iter().map(|&c| c as u32));
+                        at += 1;
+                    }
+                    job.remaining = order.into();
+                } else if manifest.page(1).is_some() {
+                    job.remaining.push_back(1);
+                }
+            }
+            let known = manifest.clone();
             match self.surfaces.upload_asset(
                 document,
                 job.target,
@@ -580,14 +598,18 @@ impl Service {
                     } else {
                         self.load_stats.failed += 1;
                     }
-                    if delivery.ready && job.level == 0 && job.detail && has_detail {
-                        // Root input was consumed/dropped before starting detail under the same lease.
-                        job.level = 1;
+                    if delivery.ready
+                        && job.detail
+                        && let Some(next_level) = job.remaining.pop_front()
+                    {
+                        // Previous input was consumed/dropped before the next page under the same lease.
+                        job.level = next_level;
                         let task = Task {
                             ticket: completion.ticket,
                             path: job.path.clone(),
                             reference: job.guard.reference(),
-                            level: 1,
+                            level: next_level,
+                            manifest: Some(Arc::new(known)),
                         };
                         if self.loader.submit(task).is_ok() {
                             self.loads.insert(completion.ticket, job);

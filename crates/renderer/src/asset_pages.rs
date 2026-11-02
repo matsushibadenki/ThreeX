@@ -1,4 +1,4 @@
-//! Fixed-capacity page residency and two-level LOD selection, independent of GPU availability.
+//! Fixed-capacity v1/v2 page residency and atomic LOD cuts, independent of GPU availability.
 use crate::resource_handles::{ResourceHandle, ResourcePool};
 use std::collections::BTreeMap;
 use threex_core::{
@@ -18,13 +18,13 @@ pub enum PageFailure {
 pub struct PageRequest {
     handle: ResourceHandle,
     reference: AssetRef,
-    level: u8,
+    level: u32,
 }
 impl PageRequest {
     pub fn reference(self) -> AssetRef {
         self.reference
     }
-    pub fn level(self) -> u8 {
+    pub fn level(self) -> u32 {
         self.level
     }
 }
@@ -61,12 +61,26 @@ struct Resident {
     handle: ResourceHandle,
     bytes: u64,
 }
+/// Per-instance CPU cut budget; zero is treated as root-only coverage.
+#[derive(Clone, Copy, Debug)]
+pub struct HierarchyCutBudget {
+    pub max_visits: usize,
+    pub max_draws: usize,
+}
+impl Default for HierarchyCutBudget {
+    fn default() -> Self {
+        Self {
+            max_visits: 64,
+            max_draws: 32,
+        }
+    }
+}
 /// Payload bytes (ready + pending) and slot count are bounded for this pool's lifetime.
 /// Factory output must not exceed the validated page byte size (e.g. raw GPU vertex/u32 index buffers).
 pub struct PagePool<T> {
     resources: ResourcePool<T>,
     pending: BTreeMap<ResourceHandle, Pending>,
-    ready: BTreeMap<(AssetRef, u8), Resident>,
+    ready: BTreeMap<(AssetRef, u32), Resident>,
     document: Option<threex_core::DocumentId>,
     max_bytes: u64,
     used: u64,
@@ -104,7 +118,7 @@ impl<T> PagePool<T> {
         document: &Document,
         entity: u32,
         manifest: &AssetManifest,
-        level: u8,
+        level: u32,
     ) -> Result<PageAdmission, PageFailure> {
         let id = document
             .document_id()
@@ -236,18 +250,14 @@ impl<T> PagePool<T> {
         let node = hierarchy.select_one(
             3,
             |_, _| want_detail,
-            |page| {
-                u8::try_from(page)
-                    .ok()
-                    .is_some_and(|level| self.ready.contains_key(&(manifest.reference(), level)))
-            },
+            |page| self.ready.contains_key(&(manifest.reference(), page)),
         );
-        let level = node.map(|n| hierarchy.nodes()[n].page as u8);
+        let level = node.map(|n| hierarchy.nodes()[n].page);
         PageSelection {
             lod: match level {
-                Some(1) => Lod::Detail,
                 Some(0) => Lod::Root,
-                _ => Lod::BoundsProxy,
+                Some(_) => Lod::Detail,
+                None => Lod::BoundsProxy,
             },
             handle: level.and_then(|level| {
                 self.ready
@@ -258,6 +268,9 @@ impl<T> PagePool<T> {
         }
     }
     pub fn select(&self, manifest: &AssetManifest, want_detail: bool) -> PageSelection {
+        if let Some(h) = manifest.hierarchy() {
+            return self.select_hierarchy(manifest, h, want_detail);
+        }
         for (level, lod) in [(1, Lod::Detail), (0, Lod::Root)] {
             if level == 1 && !want_detail {
                 continue;
@@ -276,21 +289,65 @@ impl<T> PagePool<T> {
             bounds: manifest.bounds(),
         }
     }
+    /// Retain the root; remove all finer hierarchy pages and reservations.
     pub fn evict_detail(&mut self, reference: AssetRef) {
-        let handles: Vec<_> = self
+        let pending: Vec<_> = self
             .pending
             .iter()
             .filter_map(|(&h, p)| {
-                (p.request.reference == reference && p.request.level == 1).then_some(h)
+                (p.request.reference == reference && p.request.level != 0).then_some(h)
             })
             .collect();
-        for h in handles {
+        for h in pending {
             self.discard(h);
         }
-        if let Some(r) = self.ready.remove(&(reference, 1)) {
-            self.used -= r.bytes;
-            self.resources.release(r.handle);
+        let keys: Vec<_> = self
+            .ready
+            .keys()
+            .filter(|&&(r, n)| r == reference && n != 0)
+            .copied()
+            .collect();
+        for key in keys {
+            let page = self.ready.remove(&key).unwrap();
+            self.used -= page.bytes;
+            self.resources.release(page.handle);
         }
+    }
+    /// Resident-only atomic coverage cut. Root/proxy remains available when
+    /// children are missing or the per-instance visit/draw budget is exhausted.
+    pub fn select_cut(
+        &self,
+        manifest: &AssetManifest,
+        budget: HierarchyCutBudget,
+        refine: impl FnMut(usize, &threex_core::lod_hierarchy::LodNode) -> bool,
+    ) -> Vec<PageSelection> {
+        let Some(h) = manifest.hierarchy() else {
+            return vec![self.select(manifest, false)];
+        };
+        let cut = h.select(
+            budget.max_visits.max(1),
+            budget.max_draws.max(1),
+            refine,
+            |page| self.ready.contains_key(&(manifest.reference(), page)),
+        );
+        if cut.nodes.is_empty() {
+            return vec![PageSelection {
+                lod: Lod::BoundsProxy,
+                handle: None,
+                bounds: manifest.bounds(),
+            }];
+        }
+        cut.nodes
+            .into_iter()
+            .map(|i| {
+                let n = &h.nodes()[i];
+                PageSelection {
+                    lod: if i == 0 { Lod::Root } else { Lod::Detail },
+                    handle: Some(self.ready[&(manifest.reference(), n.page)].handle),
+                    bounds: n.bounds,
+                }
+            })
+            .collect()
     }
     pub fn release_asset(&mut self, reference: AssetRef) {
         self.evict_detail(reference);
@@ -393,7 +450,7 @@ pub(crate) mod tests {
         .unwrap();
         d
     }
-    fn load<T>(pool: &mut PagePool<T>, d: &Document, m: &AssetManifest, level: u8) -> PageRequest {
+    fn load<T>(pool: &mut PagePool<T>, d: &Document, m: &AssetManifest, level: u32) -> PageRequest {
         let PageAdmission::Load(r) = pool.begin(d, 1, m, level).unwrap() else {
             panic!()
         };
@@ -998,5 +1055,154 @@ mod generated_parent_tests {
             empty.begin(&document, 1, &manifest, 0),
             Err(PageFailure::Capacity)
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod hierarchy_tests {
+    use super::*;
+    use threex_core::{
+        AssetId,
+        cluster_builder::{ClusterBudget, ParentGeometryBudget, SimplifiedClusters},
+        hierarchy_asset::{HierarchyManifest, encode_page},
+        simplify::SimplifyBudget,
+    };
+    pub(crate) fn fixture() -> (AssetManifest, Vec<Vec<u8>>) {
+        let v = [
+            [0., 0., 1.],
+            [0., 0., -1.],
+            [1., 0., 0.],
+            [0., 1., 0.],
+            [-1., 0., 0.],
+            [0., -1., 0.],
+        ];
+        let t = [
+            [0, 2, 3],
+            [0, 3, 4],
+            [0, 4, 5],
+            [0, 5, 2],
+            [1, 3, 2],
+            [1, 4, 3],
+            [1, 5, 4],
+            [1, 2, 5],
+        ];
+        let source = SimplifiedClusters::build(
+            &v,
+            &t,
+            &[],
+            ClusterBudget {
+                leaf_triangles: 2,
+                max_triangles: 8,
+                max_nodes: 7,
+            },
+            ParentGeometryBudget {
+                simplify: SimplifyBudget {
+                    target_triangles: 4,
+                    max_error: 2.,
+                    max_attempts: 64,
+                    max_input_triangles: 8,
+                },
+                max_source_vertices: 6,
+                max_stored_triangles: 24,
+                max_total_attempts: 64,
+            },
+        )
+        .unwrap();
+        let (m, bytes) =
+            HierarchyManifest::prepare(AssetId::from_bytes([81; 16]).unwrap(), 1, &source).unwrap();
+        (
+            AssetManifest::decode(&bytes, m.reference()).unwrap(),
+            (0..7).map(|n| encode_page(&source, n).unwrap().1).collect(),
+        )
+    }
+    #[test]
+    fn partial_residency_budget_eviction_and_sparse_gather_keep_atomic_coverage() {
+        use crate::{
+            batching::GeometryBatches,
+            gather::{PlanCache, Prepared},
+        };
+        let (m, bytes) = fixture();
+        let mut d = tests::document(m.reference());
+        let mut pool = PagePool::new(1024 * 1024, 16);
+        let mut data = vec![d.scene().instances()[0]; 1200];
+        for (i, v) in data.iter_mut().enumerate() {
+            v.color[3] = (1 + i % 3) as f32;
+        }
+        let mut batches = GeometryBatches::default();
+        batches.sync(&data, std::iter::once(0..1200));
+        let revision = batches.revision(0);
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: 2560,
+            ..Default::default()
+        };
+        let mut cache = PlanCache::default();
+        assert!(matches!(
+            cache.prepare(&limits, [100000, 100000], &batches, 0, true),
+            Prepared::Gather { upload: true, .. }
+        ));
+        assert_eq!(
+            pool.select_cut(&m, HierarchyCutBudget::default(), |_, _| true)[0].lod,
+            Lod::BoundsProxy
+        );
+        for (at, n) in [0u32, 1, 4, 2, 3, 5, 6].into_iter().enumerate() {
+            let PageAdmission::Load(r) = pool.begin(&d, 1, &m, n).unwrap() else {
+                panic!()
+            };
+            pool.complete(
+                &d,
+                r,
+                Ok(m.decode_page(n, bytes[n as usize].clone()).unwrap()),
+                |p| p,
+            )
+            .unwrap();
+            let cut = pool.select_cut(&m, HierarchyCutBudget::default(), |_, _| true);
+            assert_eq!(cut.len(), [1, 1, 2, 2, 3, 3, 4][at]);
+        }
+        assert_eq!(
+            pool.select_cut(
+                &m,
+                HierarchyCutBudget {
+                    max_visits: 1,
+                    max_draws: 1
+                },
+                |_, _| true
+            )[0]
+            .lod,
+            Lod::Root
+        );
+        assert_eq!(
+            pool.select(&m, true).lod,
+            Lod::Root,
+            "legacy single-page API must not expose half a branch"
+        );
+        batches.sync(&data, std::iter::empty());
+        assert_eq!(batches.transfer_count(0, false), 0);
+        assert_eq!(batches.revision(0), revision);
+        assert!(matches!(
+            cache.prepare(&limits, [100000, 100000], &batches, 0, true),
+            Prepared::Gather { upload: false, .. }
+        ));
+        pool.evict_detail(m.reference());
+        assert_eq!(pool.status().resident_pages, 1);
+        assert_eq!(
+            pool.select_cut(&m, HierarchyCutBudget::default(), |_, _| true)[0].lod,
+            Lod::Root
+        );
+        let PageAdmission::Load(pending) = pool.begin(&d, 1, &m, 1).unwrap() else {
+            panic!()
+        };
+        d.commit(1, &threex_core::asset_command(1, None)).unwrap();
+        assert_eq!(
+            pool.complete(
+                &d,
+                pending,
+                Ok(m.decode_page(1, bytes[1].clone()).unwrap()),
+                |p| p
+            ),
+            Err(PageFailure::Stale)
+        );
+        pool.release_asset(m.reference());
+        assert_eq!(pool.status().reserved_bytes, 0);
+        assert_eq!(pool.status().resident_pages, 0);
     }
 }

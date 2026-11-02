@@ -161,4 +161,8 @@ Camera contracts, Rust computation and pending WASM verification: [docs/camera.m
 
 [CPU bounds/frustum and screen-space LOD selection](docs/cpu-lod.md): per-instance hysteresis, root/proxy fallback, sparse bounds updates and resident gather index reuse are implemented. Hierarchical traversal follows in G03-B; actual GPU verification remains Pending.
 
-[Independent asset and instance hierarchies](docs/hierarchies.md): exact cluster partitioning, atomic coverage cuts and sparse instance bounds refits; [boundary-preserving parent generation](docs/parent-simplification.md) is implemented. Multilevel page persistence and background generation remain G03-B2b.
+[Independent asset and instance hierarchies](docs/hierarchies.md): exact cluster partitioning, atomic coverage cuts and sparse instance bounds refits; [boundary-preserving parent generation](docs/parent-simplification.md) is implemented. Multilevel persistence APIs are implemented; [worker/GPU delivery](docs/native-hierarchy-delivery.md) is connected, with actual GPU verification Pending. [Bounded background generation and session cache](docs/background-hierarchy-builder.md) are implemented.
+
+[Multilevel asset persistence](docs/hierarchy-asset-format.md): bounded THREEXA2 metadata/page reads and immutable publication are implemented. [Native worker/GPU delivery](docs/native-hierarchy-delivery.md) is connected; existing THREEXA1 rendering is preserved, and actual GPU verification is Pending.
+
+[Background hierarchy builder](docs/background-hierarchy-builder.md): one bounded Rust CPU lane, verified disk LRU and durable output publication; stale guards prevent automatic Document edits.
