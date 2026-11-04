@@ -41,7 +41,13 @@
 - 🟢 [Done] G03-B2b1の多段page保存と有界読み込み（[詳細](hierarchy-asset-format.md)）。
 - 🟢 [Done] G03-B2b2のworker／GPUコード接続（[詳細](native-hierarchy-delivery.md)）。
 - 🟢 [Done] G03-B2b3のbackground builder／生成結果cache（[詳細](background-hierarchy-builder.md)）。
-- 🟠 [Next] view全体の階層budget・詳細LOD履歴／cut cache。camera view offset／film設定などの互換API。
+- 🟢 [Done] view全体のasset階層訪問budget（[仕様](view-hierarchy-budget.md)）。
+- 🟢 [Done] 詳細LOD履歴と有界cut cache（[仕様](lod-cut-cache.md)）。
+- 🟢 [Done] instance階層の訪問budgetと移動蓄積による再分割（[仕様](instance-spatial-budget.md)）。
+- 🟢 [Done] view全体のcluster／triangle描画budgetとcoverage floor診断（[仕様](view-draw-budget.md)）。
+- 🟢 [Done] cut cache優先度・巡回受付・有界退避履歴（[仕様](cut-cache-fairness.md)）。
+- 🟢 [Done] view依存streaming batch・SSE優先度・共有request budget（[仕様](view-streaming.md)）。
+- 🟠 [Next] resident-aware要求統合・asset横断優先queue。camera view offset／film設定などの互換API。
 - ⭕️ [Pending] compute gatherの実GPU readback・性能・閾値調整。
 - 🟢 [Done] Release CPU scene benchmark at 100 / 1k / 10k / 100k objects, before/after CSV.
 - 🔴 [Later] GPU Scene／compute cullingと10万cube比較：巨大geometry計画G03／G04の後、G05で実装・比較。
@@ -147,7 +153,12 @@ Universal-3Dとは固定形状bank・共有geometry・差分更新の責務を�
 🟢 [Done] G03-B2b1：THREEXA2の多段page形式・親geometryのpage化・immutable保存・有界seek/read（[仕様・検証](hierarchy-asset-format.md)）。
 🟢 [Done] G03-B2b2：v2の有界worker配送・lease内metadata共有・resident cut／GPU drawコード接続（[仕様・検証](native-hierarchy-delivery.md)）。
 🟢 [Done] G03-B2b3：専用CPU lane、admission／生成／disk LRU上限、guard付き反映と耐久出力（[仕様・検証](background-hierarchy-builder.md)）。
-🟠 [Next] view全体の訪問budget・詳細LOD履歴／cut cache。G03全体は未完了。
+🟢 [Done] G03-C1：view全体のasset階層訪問budget、使い切った後のroot／proxy coverage（[仕様・検証](view-hierarchy-budget.md)）。
+🟢 [Done] G03-C2：詳細nodeのhysteresis・256 instance上限cut cache、view／Transform／residency変更時の再計算（[仕様・検証](lod-cut-cache.md)）。
+🟢 [Done] G03-C3：instance階層の訪問budget・保守的frontier候補化・移動蓄積による再分割（[仕様・検証](instance-spatial-budget.md)）。
+🟢 [Done] G03-C4：view全体のcluster／triangle描画budget、root予約・cut単位fallback・coverage floor診断（[仕様・検証](view-draw-budget.md)）。
+🟢 [Done] G03-C5：詳細要求／階層規模の優先枠と巡回枠、有界退避履歴、容量圧迫時のcoverage維持（[仕様・検証](cut-cache-fairness.md)）。
+🟢 [Done] G04-A：view依存streaming batch、SSE優先度・共有request budget（[仕様・検証](view-streaming.md)）。G03の実GPU gateはPending。
 🔴 [Later] 永続cache indexとクラッシュ残骸の回収。
 
 - 🟢 [Done] G03-B1：元頂点を変更しないcluster分割と複数段coverage treeのCPU選択、容量不足／子欠落時の親維持。
@@ -159,7 +170,7 @@ Universal-3Dとは固定形状bank・共有geometry・差分更新の責務を�
 - 🟢 [Done] G03-A：既存のbounds／root・detailでCPU frustum判定・screen-space errorの選択を実装。hierarchy traversalはG03-Bで拡張する。
 - ⭕️ [Pending] 実GPU画像のclip境界・LOD poppingとMacBook Air性能。Metal adapter NotFoundのためCPU検証と区別する。
 - 🟢 [Done] 登録asset instanceの階層node単位の不可視除外とdirty leaf祖先のみのrefit。camera変更時のmetadata走査・draw plan再構築はO(instance数)で残る。
-- 🟠 [Next] instance階層の訪問budget・再平衡と、asset内clusterの階層描画へ拡張する。
+- 🟢 [Done] instance階層の訪問budget・再分割と、asset内clusterの階層描画（G03-C3／G03-B2b2）。
 - 各枝は親または必要な子の集合で面を覆う。子が揃う前に親を消して穴を作らない。
 - cluster境界の亀裂、異なるLOD間の継ぎ目、急な詳細度切替を検証し、境界保持とhysteresisを導入する。
 - viewごとのnode訪問数・cluster数・triangle数・request数に上限を設け、打ち切り時は親へ戻す。
@@ -170,7 +181,8 @@ budget縮小でもcoverageを維持するCPUテスト。実画像の亀裂・pop
 
 ### G04：非同期streaming・複数budget・退避
 
-🔴 [Later] CPU参照選択に基づく要求を、有界workerへ接続する。
+🟢 [Done] G04-A：CPUのview依存詳細要求を共有request／訪問budget付きで有界workerへ接続（[仕様・検証](view-streaming.md)）。
+🟠 [Next] resident-aware要求統合とasset横断優先dispatch。
 
 - page状態を未要求／待機／読込中／CPU常駐／GPU常駐／退避待ち／失敗などで明示し、重複要求をまとめる。
 - root／画面上の誤差改善が大きいpageを優先し、camera移動予測による先読みは余剰budget内に限定する。
@@ -284,8 +296,8 @@ MacBook Air实机帧时间、内存压力、持续负载和GPU正确性在完成
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust core: 75 passed; storage: 84 passed; renderer: 44 passed; Tauri host: 18 passed in debug and release. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
-- Current native suite: 221 passed in debug and release; JS: 13 passed.
+- Rust core: 75 passed; storage: 86 passed; renderer: 56 passed; Tauri host: 18 passed in the current debug suite. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
+- Current native suite: 235 passed in debug; JS: 13 passed. The earlier G03-B2b3 release baseline passed 221 tests; G03-C1–C5／G04-A have not been rerun in release.
 - JS compatibility tests: 13 passed.
 - Native GPU pipeline / gather readback tests: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.

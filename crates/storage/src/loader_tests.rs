@@ -730,3 +730,156 @@ fn hierarchy_page_failure_and_capacity_stop_without_publishing_partial_children(
         worker.shutdown().unwrap();
     }
 }
+
+fn streaming_view() -> threex_renderer::streaming::StreamingView {
+    threex_renderer::streaming::StreamingView {
+        camera: [
+            1f32, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ]
+        .map(f32::to_bits),
+        size: [800, 600],
+        error_pixels: 2f32.to_bits(),
+    }
+}
+#[test]
+fn view_streaming_shares_request_budget_across_roots_and_keeps_parent_coverage() {
+    use threex_renderer::streaming::RequestBudget;
+    let t = Temp::new();
+    let path = t.0.join("hierarchy");
+    let reference = hierarchy_fixture(&path);
+    let surfaces = NativeSurfaces::default();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let cuts = Arc::new(Mutex::new(Vec::new()));
+    let target = surfaces
+        .attach(
+            1,
+            Box::new(Backend {
+                pool: PagePool::new(1 << 20, 16),
+                manifests: BTreeMap::new(),
+                log: Arc::new(Mutex::new(Vec::new())),
+                cuts: Some(cuts.clone()),
+            }),
+            64,
+            64,
+        )
+        .unwrap();
+    let worker = JournalWorker::start_native(
+        DocumentStore::new(t.0.join("doc")),
+        WorkerConfig::default(),
+        surfaces,
+        Arc::new(RecordingSource(reads.clone())),
+    )
+    .unwrap();
+    let c = worker.client();
+    let mut next = 0;
+    bind(&c, &mut next, reference, 2);
+    let result = call(
+        &c,
+        &mut next,
+        WorkerAction::StreamAssets {
+            target,
+            assets: vec![(1, path.clone()), (2, path.clone()), (1, path.clone())],
+            view: Box::new(streaming_view()),
+            budget: RequestBudget {
+                requests: 4,
+                visits: 64,
+            },
+        },
+    );
+    let WorkerOutcome::StreamAssets { accepted, state } = result else {
+        panic!()
+    };
+    assert_eq!(accepted, 2);
+    assert_eq!(state.revision, 1);
+    let stats = idle(&c, &mut next);
+    assert_eq!(stats.completed, 4);
+    assert_eq!(stats.failed, 0);
+    assert_eq!(stats.streaming_reserved_requests, 4);
+    assert!(stats.streaming_visits <= 64);
+    let reads = reads.lock().unwrap();
+    assert_eq!(reads.len(), 4);
+    assert_eq!(reads.iter().filter(|&&(n, _)| n == 0).count(), 2);
+    assert!(reads.iter().any(|&(n, _)| n == 1) && reads.iter().any(|&(n, _)| n == 4));
+    drop(reads);
+    assert!(cuts.lock().unwrap().iter().all(|(_, ids)| !ids.is_empty()));
+    let WorkerOutcome::StreamAssets { accepted, .. } = call(
+        &c,
+        &mut next,
+        WorkerAction::StreamAssets {
+            target,
+            assets: vec![(1, path)],
+            view: Box::new(streaming_view()),
+            budget: RequestBudget {
+                requests: 0,
+                visits: 0,
+            },
+        },
+    ) else {
+        panic!()
+    };
+    assert_eq!(accepted, 0);
+    assert_eq!(idle(&c, &mut next).completed, 4);
+    worker.shutdown().unwrap();
+}
+#[test]
+fn new_view_discards_inflight_streaming_without_freeing_lease_early() {
+    use threex_renderer::streaming::RequestBudget;
+    let t = Temp::new();
+    let path = t.0.join("hierarchy");
+    let reference = hierarchy_fixture(&path);
+    let surfaces = NativeSurfaces::default();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let target = surfaces
+        .attach(1, backend(1 << 20, log.clone()), 64, 64)
+        .unwrap();
+    let gate = Arc::new(Gate::default());
+    let worker = JournalWorker::start_native(
+        DocumentStore::new(t.0.join("doc")),
+        WorkerConfig::default(),
+        surfaces,
+        Arc::new(GatedSource(gate.clone())),
+    )
+    .unwrap();
+    let c = worker.client();
+    let mut next = 0;
+    bind(&c, &mut next, reference, 1);
+    call(
+        &c,
+        &mut next,
+        WorkerAction::StreamAssets {
+            target,
+            assets: vec![(1, path)],
+            view: Box::new(streaming_view()),
+            budget: RequestBudget {
+                requests: 7,
+                visits: 64,
+            },
+        },
+    );
+    gate.wait_started(1);
+    call(
+        &c,
+        &mut next,
+        WorkerAction::StreamAssets {
+            target,
+            assets: vec![],
+            view: Box::new(streaming_view()),
+            budget: RequestBudget {
+                requests: 0,
+                visits: 0,
+            },
+        },
+    );
+    let WorkerOutcome::AssetLoads { stats, .. } =
+        call(&c, &mut next, WorkerAction::InspectAssetLoads)
+    else {
+        panic!()
+    };
+    assert_eq!(stats.pending, 1);
+    gate.open();
+    let stats = idle(&c, &mut next);
+    assert_eq!(stats.stale, 1);
+    assert_eq!(stats.completed, 0);
+    assert!(log.lock().unwrap().is_empty());
+    worker.shutdown().unwrap();
+}

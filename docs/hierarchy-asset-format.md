@@ -6,7 +6,8 @@
 
 🟢 [Done] G03-B2b3：[background builder／生成結果cache](background-hierarchy-builder.md)。
 
-🟠 [Next] view全体の訪問budget・詳細LOD履歴／cut cache。G03-B全体の完了ではない。
+🟢 [Done] view全体のasset訪問budgetと詳細LOD履歴／cut cache（[G03-C2](lod-cut-cache.md)）。
+🟢 [Done] instance空間階層の訪問budget・再分割（[G03-C3](instance-spatial-budget.md)）。G03-B全体の完了ではない。
 
 ## Rust API
 

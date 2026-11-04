@@ -48,6 +48,8 @@ pub struct CpuLodStats {
     pub bounds_tests: usize,
     pub draw_ranges: usize,
     pub spatial_nodes: usize,
+    pub spatial_deferred: usize,
+    pub spatial_rebalanced: bool,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct LodView {
@@ -63,6 +65,7 @@ struct ViewKey {
     threshold: u32,
     hysteresis: u32,
     cull: bool,
+    visits: usize,
 }
 struct Entry {
     reference: AssetRef,
@@ -83,8 +86,12 @@ pub(crate) struct CpuLodPlanner {
     stats: CpuLodStats,
     spatial: SpatialIndex,
     hierarchies: BTreeMap<AssetRef, LodHierarchy>,
+    visit_budget: Option<usize>,
 }
 impl CpuLodPlanner {
+    pub fn set_visit_budget(&mut self, visits: usize) {
+        self.visit_budget = Some(visits);
+    }
     pub fn hierarchy(&self, reference: AssetRef) -> &LodHierarchy {
         &self.hierarchies[&reference]
     }
@@ -107,6 +114,7 @@ impl CpuLodPlanner {
             threshold: policy.max_error_pixels.to_bits(),
             hysteresis: policy.hysteresis_ratio.to_bits(),
             cull: policy.frustum_culling,
+            visits: self.visit_budget.unwrap_or(4096),
         };
         let view_changed = self.key.as_ref() != Some(&key);
         let mut plan_changed = layout_changed;
@@ -164,16 +172,21 @@ impl CpuLodPlanner {
                 }
             }
         }
+        self.stats.spatial_rebalanced = !layout_changed && self.spatial.rebalance();
         let query = if view_changed || layout_changed || !changes.is_empty() {
-            Some(self.spatial.query(if policy.frustum_culling {
-                camera.as_ref()
-            } else {
-                None
-            }))
+            Some(self.spatial.query_budget(
+                if policy.frustum_culling {
+                    camera.as_ref()
+                } else {
+                    None
+                },
+                key.visits,
+            ))
         } else {
             None
         };
         self.stats.spatial_nodes = query.as_ref().map_or(0, |q| q.visited);
+        self.stats.spatial_deferred = query.as_ref().map_or(0, |q| q.deferred);
         self.stats.bounds_tests = 0;
         for source in dirty {
             let e = self.entries.get_mut(&source).unwrap();
@@ -213,8 +226,12 @@ impl CpuLodPlanner {
         }
         let tests = self.stats.bounds_tests;
         let spatial_nodes = self.stats.spatial_nodes;
+        let spatial_deferred = self.stats.spatial_deferred;
+        let spatial_rebalanced = self.stats.spatial_rebalanced;
         self.stats = CpuLodStats {
             spatial_nodes,
+            spatial_deferred,
+            spatial_rebalanced,
             candidates: self.entries.len(),
             bounds_tests: tests,
             ..Default::default()
@@ -344,6 +361,44 @@ mod tests {
         assert_eq!(planner.status().visible, 1);
         assert_eq!(planner.status().bounds_tests, 1);
         assert_eq!(batches.revision(0), revision);
+    }
+    #[test]
+    fn spatial_budget_changes_reassess_without_losing_lod_history() {
+        let (m, _) = fixture();
+        let d = document(m.reference());
+        let mut data = vec![d.scene().instances()[0]; 64];
+        let mut layout = AssetDrawLayout::default();
+        layout
+            .draws
+            .insert(m.reference(), std::iter::once(0..64).collect());
+        let mut p = CpuLodPlanner::default();
+        p.sync(&data, &layout, true, &[], view(160), |_| &m);
+        assert!(p.draws.iter().all(|d| d.want_detail));
+        p.set_visit_budget(0);
+        p.sync(&data, &layout, false, &[], view(130), |_| &m);
+        assert_eq!(p.status().spatial_nodes, 0);
+        assert_eq!(p.status().spatial_deferred, 64);
+        assert_eq!(p.status().visible, 64);
+        assert!(p.draws.iter().all(|d| d.want_detail));
+        for (i, v) in data.iter_mut().enumerate() {
+            v.model[3][0] = if i % 2 == 0 { 0.1 } else { 0.2 };
+        }
+        p.sync(
+            &data,
+            &layout,
+            false,
+            std::slice::from_ref(&(0..64)),
+            view(130),
+            |_| &m,
+        );
+        assert!(p.status().spatial_rebalanced);
+        assert_eq!(p.status().visible, 64);
+        assert!(p.draws.iter().all(|d| d.want_detail));
+        p.set_visit_budget(1);
+        p.sync(&data, &layout, false, &[], view(130), |_| &m);
+        assert_eq!(p.status().spatial_nodes, 1);
+        assert_eq!(p.status().visible, 64);
+        assert!(!p.status().spatial_rebalanced);
     }
     #[test]
     fn policy_rejects_nonfinite_and_unstable_thresholds() {

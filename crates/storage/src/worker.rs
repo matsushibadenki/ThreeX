@@ -63,6 +63,13 @@ pub enum WorkerAction {
         path: std::path::PathBuf,
         detail: bool,
     },
+    /// Trusted Rust batch: at most eight roots; all detail requests share one allowance.
+    StreamAssets {
+        target: threex_renderer::native::SurfaceHandle,
+        assets: Vec<(u32, std::path::PathBuf)>,
+        view: Box<threex_renderer::streaming::StreamingView>,
+        budget: threex_renderer::streaming::RequestBudget,
+    },
     InspectAssetLoads,
     Save,
     Inspect,
@@ -205,6 +212,10 @@ pub enum WorkerOutcome {
         ticket: Option<threex_renderer::resource_handles::ResourceHandle>,
         state: WorkerState,
     },
+    StreamAssets {
+        accepted: usize,
+        state: WorkerState,
+    },
     AssetLoads {
         stats: AssetLoaderStats,
         state: WorkerState,
@@ -305,6 +316,10 @@ impl WorkerClient {
             return reject(request, WorkerCode::CommandTooLarge);
         }
         if matches!(&request.action,WorkerAction::LoadAsset {path,..} if path.as_os_str().as_encoded_bytes().len()>8192)
+        {
+            return reject(request, WorkerCode::CommandTooLarge);
+        }
+        if matches!(&request.action,WorkerAction::StreamAssets {assets,..} if assets.len()>8 || assets.iter().any(|(_,p)|p.as_os_str().as_encoded_bytes().len()>8192))
         {
             return reject(request, WorkerCode::CommandTooLarge);
         }
@@ -463,6 +478,10 @@ struct LoadJob {
     remaining: VecDeque<u32>,
     detail: bool,
     cancelled: bool,
+    streaming: Option<(
+        threex_renderer::streaming::StreamingView,
+        Arc<Mutex<threex_renderer::streaming::RequestBudget>>,
+    )>,
 }
 struct Service {
     loader: Loader,
@@ -544,11 +563,62 @@ impl Service {
                 remaining: VecDeque::new(),
                 detail,
                 cancelled: false,
+                streaming: None,
             },
         );
         self.load_stats.queued += 1;
         self.load_stats.pending(self.loads.len());
         outcome(self, AssetLoadStatus::Queued, Some(ticket))
+    }
+    fn stream_assets(
+        &mut self,
+        target: threex_renderer::native::SurfaceHandle,
+        assets: &[(u32, std::path::PathBuf)],
+        view: threex_renderer::streaming::StreamingView,
+        mut budget: threex_renderer::streaming::RequestBudget,
+    ) -> WorkerOutcome {
+        // A new view cancels old view-dependent results without freeing in-flight leases early.
+        for job in self
+            .loads
+            .values_mut()
+            .filter(|j| j.target == target && j.streaming.is_some())
+        {
+            job.cancelled = true;
+        }
+        self.load_stats.streaming_batches += 1;
+        budget.requests = budget.requests.min(4096);
+        budget.visits = budget.visits.min(4096);
+        let shared = Arc::new(Mutex::new(budget));
+        let mut accepted = 0;
+        let mut seen = std::collections::BTreeSet::new();
+        for (entity, path) in assets {
+            if !seen.insert(*entity) || shared.lock().unwrap().requests == 0 {
+                continue;
+            }
+            // Do not coalesce with a legacy job: this view has its own shared request accounting.
+            for job in self
+                .loads
+                .values_mut()
+                .filter(|j| j.target == target && j.guard.entity() == *entity)
+            {
+                job.cancelled = true;
+            }
+            if let WorkerOutcome::AssetLoad {
+                ticket: Some(ticket),
+                ..
+            } = self.load_asset(target, *entity, path, true)
+                && let Some(job) = self.loads.get_mut(&ticket)
+            {
+                job.streaming = Some((view, shared.clone()));
+                shared.lock().unwrap().requests -= 1;
+                accepted += 1;
+                self.load_stats.streaming_reserved_requests += 1;
+            }
+        }
+        WorkerOutcome::StreamAssets {
+            accepted,
+            state: self.state(),
+        }
     }
     fn complete_load(&mut self, completion: Completion) {
         if !self
@@ -566,7 +636,19 @@ impl Service {
             self.load_stats.stale += 1;
         } else if let Some(manifest) = completion.loaded.manifest {
             if job.level == 0 && job.detail {
-                if let Some(h) = manifest.hierarchy() {
+                if let Some((view, budget)) = &job.streaming {
+                    if let Some(model) = document.scene().world_transform(job.guard.entity()) {
+                        let plan = threex_renderer::streaming::plan(
+                            &manifest,
+                            &model,
+                            *view,
+                            &mut budget.lock().unwrap(),
+                        );
+                        self.load_stats.streaming_reserved_requests += plan.pages.len() as u64;
+                        self.load_stats.streaming_visits += plan.visited as u64;
+                        job.remaining = plan.pages.into();
+                    }
+                } else if let Some(h) = manifest.hierarchy() {
                     let mut order: Vec<u32> =
                         h.nodes()[0].children.iter().map(|&n| n as u32).collect();
                     let mut at = 0;
@@ -902,6 +984,12 @@ impl Service {
                     path,
                     detail,
                 } => Ok(self.load_asset(*target, *entity, path, *detail)),
+                WorkerAction::StreamAssets {
+                    target,
+                    assets,
+                    view,
+                    budget,
+                } => Ok(self.stream_assets(*target, assets, **view, *budget)),
                 WorkerAction::InspectAssetLoads => Ok(WorkerOutcome::AssetLoads {
                     stats: self.load_stats.clone(),
                     state: self.state(),

@@ -84,6 +84,7 @@ pub struct PagePool<T> {
     document: Option<threex_core::DocumentId>,
     max_bytes: u64,
     used: u64,
+    residency: u64,
 }
 impl<T> PagePool<T> {
     pub fn new(max_bytes: u64, max_pages: u32) -> Self {
@@ -94,7 +95,17 @@ impl<T> PagePool<T> {
             document: None,
             max_bytes,
             used: 0,
+            residency: 0,
         }
+    }
+    pub fn residency_revision(&self) -> u64 {
+        self.residency
+    }
+    fn changed(&mut self) {
+        self.residency = self
+            .residency
+            .checked_add(1)
+            .expect("residency revision exhausted");
     }
     pub fn get(&self, handle: ResourceHandle) -> Option<&T> {
         self.resources.get(handle)
@@ -220,6 +231,7 @@ impl<T> PagePool<T> {
                         bytes: p.bytes,
                     },
                 );
+                self.changed();
                 Ok(request.handle)
             }
             Err(error) => {
@@ -308,6 +320,7 @@ impl<T> PagePool<T> {
             .copied()
             .collect();
         for key in keys {
+            self.changed();
             let page = self.ready.remove(&key).unwrap();
             self.used -= page.bytes;
             self.resources.release(page.handle);
@@ -321,23 +334,37 @@ impl<T> PagePool<T> {
         budget: HierarchyCutBudget,
         refine: impl FnMut(usize, &threex_core::lod_hierarchy::LodNode) -> bool,
     ) -> Vec<PageSelection> {
+        self.select_cut_counted(manifest, budget, refine).0
+    }
+    /// Returns actual hierarchy visits so a caller can share work across a view.
+    /// Zero visits uses the constant-time resident root/proxy fallback.
+    pub fn select_cut_counted(
+        &self,
+        manifest: &AssetManifest,
+        budget: HierarchyCutBudget,
+        refine: impl FnMut(usize, &threex_core::lod_hierarchy::LodNode) -> bool,
+    ) -> (Vec<PageSelection>, usize) {
         let Some(h) = manifest.hierarchy() else {
-            return vec![self.select(manifest, false)];
+            return (vec![self.select(manifest, false)], 0);
         };
-        let cut = h.select(
-            budget.max_visits.max(1),
-            budget.max_draws.max(1),
-            refine,
-            |page| self.ready.contains_key(&(manifest.reference(), page)),
-        );
-        if cut.nodes.is_empty() {
-            return vec![PageSelection {
-                lod: Lod::BoundsProxy,
-                handle: None,
-                bounds: manifest.bounds(),
-            }];
+        if budget.max_visits == 0 {
+            return (vec![self.select(manifest, false)], 0);
         }
-        cut.nodes
+        let cut = h.select(budget.max_visits, budget.max_draws.max(1), refine, |page| {
+            self.ready.contains_key(&(manifest.reference(), page))
+        });
+        if cut.nodes.is_empty() {
+            return (
+                vec![PageSelection {
+                    lod: Lod::BoundsProxy,
+                    handle: None,
+                    bounds: manifest.bounds(),
+                }],
+                cut.visited,
+            );
+        }
+        let selected = cut
+            .nodes
             .into_iter()
             .map(|i| {
                 let n = &h.nodes()[i];
@@ -347,7 +374,8 @@ impl<T> PagePool<T> {
                     bounds: n.bounds,
                 }
             })
-            .collect()
+            .collect();
+        (selected, cut.visited)
     }
     pub fn release_asset(&mut self, reference: AssetRef) {
         self.evict_detail(reference);
@@ -360,11 +388,13 @@ impl<T> PagePool<T> {
             self.discard(h);
         }
         if let Some(r) = self.ready.remove(&(reference, 0)) {
+            self.changed();
             self.used -= r.bytes;
             self.resources.release(r.handle);
         }
     }
     pub fn clear(&mut self) {
+        self.changed();
         self.resources.clear();
         self.pending.clear();
         self.ready.clear();
@@ -1170,6 +1200,36 @@ pub(crate) mod hierarchy_tests {
             .lod,
             Lod::Root
         );
+        // Share one visit allowance across many instances, including exhausted views.
+        // Every instance still has a complete resident cut or its root fallback.
+        for total in 0..24 {
+            let mut remaining = total;
+            let mut used = 0;
+            for _ in 0..100 {
+                let before = remaining;
+                let (cut, visited) = pool.select_cut_counted(
+                    &m,
+                    HierarchyCutBudget {
+                        max_visits: remaining.min(8),
+                        max_draws: 4,
+                    },
+                    |_, _| {
+                        assert!(before > 0);
+                        true
+                    },
+                );
+                assert!(visited <= remaining.min(8));
+                assert!(!cut.is_empty());
+                assert!(cut.iter().all(|p| p.handle.is_some()));
+                if remaining == 0 {
+                    assert_eq!(cut.len(), 1);
+                    assert_eq!(cut[0].lod, Lod::Root);
+                }
+                remaining -= visited;
+                used += visited;
+            }
+            assert!(used <= total);
+        }
         assert_eq!(
             pool.select(&m, true).lod,
             Lod::Root,

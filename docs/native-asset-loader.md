@@ -1,7 +1,7 @@
 # G02-B：native有界asset loaderとredraw
 
 2026-10-25 JST。🟢 [Done] 受理したasset要求の非同期read・surface配送・対象windowへのon-demand redraw。
-実GPU／OS window検証はPending。参照からpathを探すasset catalog、優先streaming、自動retryは未実装。
+実GPU／OS window検証はPending。参照からpathを探すasset catalog、自動retryは未実装。view batchによる優先streamingは[G04-A](view-streaming.md)で接続済み。
 
 ## 利用境界
 
@@ -119,7 +119,8 @@ job／path対応付けは再起動後にnative利用側が再要求する。永�
 - 🟢 [Done] Tauri MockRuntimeでgrant／target検証、対象windowだけのredraw、別window／Document revisionへの非干渉、idle停止。
 - 🟢 [Done] 既存の1 slot差分・gather cache、保存／再起動・再送・journal障害復旧回帰。
 - ⭕️ [Pending] native GPU smokeはMetal adapter NotFound。実Wry／OS配送、実GPU upload・表示・readback・性能は未確認。
-- 🟠 [Next] G03-A：CPU bounds／frustum判定とscreen-space errorに基づくLOD選択。
+- 🟢 [Done] G03-A：CPU bounds／frustum判定とscreen-space errorに基づくLOD選択。
+- 🟢 [Done] G04-A：view batchの優先要求と共有request budget（[詳細](view-streaming.md)）。
 - 🔴 [Later] 階層cluster builder、resident判定先行read、asset catalog／path resolver、G04の優先queue・先読み・合計budget。
 
 Universal-3Dのrenderer共有meshとmain.rsの終了・非同期処理境界を参照した。

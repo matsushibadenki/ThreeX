@@ -4,7 +4,8 @@
 
 🟢 [Done] G03-B2b3：[有界background builderと生成結果cache](background-hierarchy-builder.md)。
 
-🟠 [Next] view／cut最適化。view全体の階層訪問budget、細かいLODのhysteresis／cut cache、view依存の読み込み優先度は後続作業。
+🟢 [Done] view全体のasset訪問budgetと詳細LODのhysteresis／cut cache（[G03-C2](lod-cut-cache.md)）。
+🟢 [Done] instance空間階層の訪問budget・再分割（[G03-C3](instance-spatial-budget.md)）。view依存の読み込み優先度は後続作業。
 
 ## 読み込みと所有
 
@@ -26,7 +27,7 @@ loaderの`reserved_payload_bytes`はlease数×1 MiB、`reserved_manifest_bytes`�
 
 Rust RendererはCPUのinstance空間階層とroot SSE／hysteresis選択を維持する。v2ではinstanceごとにresident-onlyの階層cutを作り、子がすべて常駐して予算内にあるときだけ親を置き換える。さらに深いnodeにはそのbounds・errorと同じview-projection／modelからSSEを適用する。root未到着時は既存のbounds proxyを使う。分岐の一部だけを単一page APIで返して穴を作らない。
 
-`HierarchyCutBudget`はinstanceごとの訪問数64・draw数32がdefault。`Renderer::set_hierarchy_cut_budget`は正の値かつ4096以下を受け付ける。cut APIへ0を直接渡した場合はroot-onlyとして扱う。これはview全体の上限ではなく、instance数に比例する仕事は残る。rootのhysteresisは既存どおりで、深いnodeは現在のSSE thresholdを直接使う。詳細levelごとの履歴やcut cacheは未実装。
+`HierarchyCutBudget`はinstanceごとの訪問数64・draw数32がdefault。`Renderer::set_hierarchy_cut_budget`は正の値かつ4096以下を受け付ける。cut APIへ0を直接渡した場合はroot-onlyとして扱う。Rendererは別途view全体のasset訪問budgetも共有する。instance数に比例するfallback描画は残る。rootのhysteresisは既存どおりで、深いnodeには[G03-C2](lod-cut-cache.md)の履歴と有界cut cacheを適用する。
 
 v2の複数geometryは同じsource Instance bufferから描画する。可視cutの変更やpage到着によるInstanceの再packing・全量転送・gather索引再送は行わない。v1の連続instance draw rangeは従来の経路を維持する。v2はCPU基準版としてinstanceごとにcut配列とdrawを作り、同一cutのinstance batch化はまだ行わない。
 

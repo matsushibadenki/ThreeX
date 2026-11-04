@@ -10,15 +10,19 @@ struct Node {
     parent: Option<usize>,
     children: Option<[usize; 2]>,
     source: Option<u32>,
+    span: std::ops::Range<usize>,
 }
 #[derive(Default)]
 pub(crate) struct SpatialIndex {
     nodes: Vec<Node>,
     leaves: BTreeMap<u32, usize>,
+    order: Vec<u32>,
+    moved: BTreeSet<u32>,
 }
 pub(crate) struct SpatialQuery {
     pub visible: BTreeSet<u32>,
     pub visited: usize,
+    pub deferred: usize,
 }
 fn union(a: Bounds, b: Bounds) -> Bounds {
     let (a, b) = (a?, b?);
@@ -64,11 +68,14 @@ impl SpatialIndex {
     pub fn rebuild(&mut self, mut items: Vec<(u32, Bounds)>) {
         self.nodes.clear();
         self.leaves.clear();
+        self.order.clear();
+        self.moved.clear();
         if !items.is_empty() {
             self.build(&mut items, None);
         }
     }
     fn build(&mut self, items: &mut [(u32, Bounds)], parent: Option<usize>) -> usize {
+        let start = self.order.len();
         let index = self.nodes.len();
         let bounds = items.iter().map(|i| i.1).reduce(union).flatten();
         self.nodes.push(Node {
@@ -76,9 +83,11 @@ impl SpatialIndex {
             parent,
             children: None,
             source: None,
+            span: start..start + items.len(),
         });
         if items.len() == 1 {
             self.nodes[index].source = Some(items[0].0);
+            self.order.push(items[0].0);
             self.leaves.insert(items[0].0, index);
         } else {
             let axis = bounds.map_or(0, |b| {
@@ -104,6 +113,10 @@ impl SpatialIndex {
         let Some(&leaf) = self.leaves.get(&source) else {
             return;
         };
+        if self.nodes[leaf].bounds == bounds {
+            return;
+        }
+        self.moved.insert(source);
         self.nodes[leaf].bounds = bounds;
         let mut parent = self.nodes[leaf].parent;
         while let Some(i) = parent {
@@ -112,18 +125,44 @@ impl SpatialIndex {
             parent = self.nodes[i].parent;
         }
     }
+    /// Repartition after substantial distinct movement. Never touches source slots or GPU layout.
+    pub fn rebalance(&mut self) -> bool {
+        let threshold = (self.leaves.len() / 4).max(32);
+        if self.moved.len() < threshold {
+            return false;
+        }
+        let items = self
+            .leaves
+            .iter()
+            .map(|(&source, &i)| (source, self.nodes[i].bounds))
+            .collect();
+        self.rebuild(items);
+        true
+    }
+    #[cfg(test)]
     pub fn query(&self, view: Option<&BoundsView>) -> SpatialQuery {
+        self.query_budget(view, usize::MAX)
+    }
+    pub fn query_budget(&self, view: Option<&BoundsView>, max_visits: usize) -> SpatialQuery {
         let mut q = SpatialQuery {
             visible: BTreeSet::new(),
             visited: 0,
+            deferred: 0,
         };
         let mut stack = Vec::new();
         if !self.nodes.is_empty() {
             stack.push(0);
         }
         while let Some(i) = stack.pop() {
-            q.visited += 1;
             let n = &self.nodes[i];
+            if q.visited == max_visits {
+                // An untested subtree remains a conservative candidate set.
+                let sources = &self.order[n.span.clone()];
+                q.deferred += sources.len();
+                q.visible.extend(sources.iter().copied());
+                continue;
+            }
+            q.visited += 1;
             if let (Some(view), Some(b)) = (view, n.bounds)
                 && view.assess(b, &identity(), 0.).visibility == BoundsVisibility::Outside
             {
@@ -164,6 +203,52 @@ mod tests {
         assert_eq!(index.query(Some(&v)).visible, BTreeSet::from([4]));
         index.rebuild(vec![]);
         assert!(index.query(Some(&v)).visible.is_empty());
+    }
+    #[test]
+    fn budget_frontier_preserves_coverage_and_rebalance_restores_partitioning() {
+        let vp = bytemuck::cast(identity());
+        let view = BoundsView::new(&vp, 800, 600).unwrap();
+        let mut tree = SpatialIndex::default();
+        tree.rebuild(
+            (0..1024)
+                .map(|i| (i, Some([i as f32, 0., 0.2, i as f32 + 0.1, 0.1, 0.8])))
+                .collect(),
+        );
+        for i in 0..1024 {
+            let x = if i % 2 == 0 { -1000. } else { 1000. } + i as f32 * 0.001;
+            tree.refit(i, Some([x, 0., 0.2, x + 0.1, 0.1, 0.8]));
+        }
+        tree.refit(500, Some([0., 0., 0.2, 0.1, 0.1, 0.8]));
+        tree.refit(501, None);
+        let before = tree.query(Some(&view));
+        assert_eq!(before.visible, BTreeSet::from([500, 501]));
+        for budget in 0..32 {
+            let q = tree.query_budget(Some(&view), budget);
+            assert!(q.visited <= budget);
+            assert!(q.visible.is_superset(&before.visible));
+            if budget == 0 {
+                assert_eq!(q.deferred, 1024);
+                assert_eq!(q.visible.len(), 1024);
+            }
+        }
+        assert!(tree.rebalance());
+        let after = tree.query(Some(&view));
+        assert_eq!(before.visible, after.visible);
+        assert!(after.visited < before.visited);
+        assert!(!tree.rebalance());
+        for budget in [0, 1, 2, 7, 32, 2048] {
+            let q = tree.query_budget(Some(&view), budget);
+            assert!(q.visited <= budget);
+            assert!(q.visible.is_superset(&after.visible));
+        }
+        let node = tree.leaves[&500];
+        tree.refit(500, tree.nodes[node].bounds);
+        assert!(
+            tree.moved.is_empty(),
+            "identical bounds/color edits do not trigger rebuilds"
+        );
+        tree.rebuild(vec![]);
+        assert_eq!(tree.query_budget(Some(&view), 0).deferred, 0);
     }
     #[test]
     fn reflected_sheared_bounds_contain_corners_and_overflow_is_unknown() {

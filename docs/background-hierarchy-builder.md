@@ -2,7 +2,8 @@
 
 🟢 [Done] Rustの`HierarchyBuilder`に、専用CPU lane、入力／受付／cache上限、生成結果のdisk LRU、検証済みTHREEXA2出力とguard付き反映を実装。
 
-🟠 [Next] view全体の階層訪問budget・詳細LOD履歴／cut cache。永続cache indexやクラッシュ後のcache清掃は後続作業。
+🟢 [Done] view全体のasset訪問budgetと詳細LOD履歴／cut cache（[G03-C2](lod-cut-cache.md)）。
+🔴 [Later] 永続cache indexやクラッシュ後のcache清掃は後続作業。
 
 ## 使用
 

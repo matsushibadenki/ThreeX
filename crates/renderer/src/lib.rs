@@ -1,6 +1,12 @@
 pub mod cpu_lod;
+mod cut_cache;
+mod draw_budget;
+pub mod streaming;
+use draw_budget::DrawAllowance;
+pub use draw_budget::{DrawCost, ViewDrawBudget, ViewDrawStats};
 mod spatial;
 use cpu_lod::{CpuLodPlanner, CpuLodPolicy, CpuLodStats, InvalidLodPolicy, LodView};
+pub use cut_cache::CutCacheStats;
 pub mod asset_pages;
 pub mod batching;
 mod gather;
@@ -73,6 +79,11 @@ pub struct Renderer {
     cpu_lod: CpuLodPlanner,
     cpu_lod_policy: CpuLodPolicy,
     hierarchy_cut_budget: asset_pages::HierarchyCutBudget,
+    hierarchy_view_visits: usize,
+    hierarchy_last_visits: usize,
+    view_draw_budget: ViewDrawBudget,
+    view_draw_stats: ViewDrawStats,
+    cut_cache: cut_cache::CutCache,
     asset_page_budget: (u64, u32),
     asset_views_dirty: bool,
 
@@ -176,6 +187,11 @@ impl Renderer {
             cpu_lod: Default::default(),
             cpu_lod_policy: Default::default(),
             hierarchy_cut_budget: Default::default(),
+            hierarchy_view_visits: 4096,
+            hierarchy_last_visits: 0,
+            view_draw_budget: Default::default(),
+            view_draw_stats: Default::default(),
+            cut_cache: Default::default(),
             asset_page_budget: (64 * 1024 * 1024, 128),
             asset_views_dirty: false,
 
@@ -220,6 +236,7 @@ impl Renderer {
             return;
         }
         self.asset_pages = PagePool::new(bytes, pages);
+        self.cut_cache = Default::default();
         self.asset_page_budget = (bytes, pages);
     }
     pub fn asset_page_status(&self) -> PagePoolStatus {
@@ -329,6 +346,28 @@ impl Renderer {
         }
         self.hierarchy_cut_budget = budget;
         Ok(())
+    }
+    /// Asset draw allowance. Root/proxy coverage is a reported minimum floor.
+    /// Counts asset cluster instances and all submitted triangles, including primitives.
+    pub fn set_view_draw_budget(&mut self, budget: ViewDrawBudget) {
+        self.view_draw_budget = budget;
+    }
+    pub fn view_draw_status(&self) -> ViewDrawStats {
+        self.view_draw_stats
+    }
+    /// Shared asset-tree traversal limit per render. Zero requests root-only coverage.
+    pub fn set_hierarchy_view_visits(&mut self, visits: usize) {
+        self.hierarchy_view_visits = visits;
+    }
+    pub fn cut_cache_status(&self) -> CutCacheStats {
+        self.cut_cache.stats()
+    }
+    pub fn hierarchy_last_visits(&self) -> usize {
+        self.hierarchy_last_visits
+    }
+    /// Caps instance-tree bounds tests; unvisited subtrees remain candidates.
+    pub fn set_instance_visit_budget(&mut self, visits: usize) {
+        self.cpu_lod.set_visit_budget(visits);
     }
     pub fn set_cpu_lod_policy(&mut self, policy: CpuLodPolicy) -> Result<(), InvalidLodPolicy> {
         self.cpu_lod_policy = policy.validate()?;
@@ -531,6 +570,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind, &[]);
+            let mut primitive_cost = DrawCost::default();
             for (spec, range) in self.batches.geometry_draws() {
                 let kind = spec.kind;
                 pass.set_vertex_buffer(
@@ -553,33 +593,110 @@ impl Renderer {
                 for range in
                     asset_pages::primitive_ranges(range, &self.asset_views.excluded[kind as usize])
                 {
+                    primitive_cost = primitive_cost.add(
+                        DrawCost {
+                            clusters: 0,
+                            triangles: u64::from(geometry.count / 3),
+                        }
+                        .scaled(u64::from(range.end - range.start)),
+                    );
                     pass.draw_indexed(0..geometry.count, 0, range);
                 }
             }
             pass.set_vertex_buffer(1, self.instances.slice(..));
             let asset_camera = threex_core::visibility::BoundsView::new(vp, width, height);
+            self.cut_cache.begin_visible(
+                scene.asset_layout_stamp(),
+                self.cpu_lod
+                    .draws
+                    .iter()
+                    .filter(|draw| self.asset_manifests[&draw.reference].0.is_hierarchical())
+                    .flat_map(|draw| {
+                        let manifest = &self.asset_manifests[&draw.reference].0;
+                        let cost =
+                            (u32::from(draw.want_detail) << 16) | manifest.page_count() as u32;
+                        draw.range.clone().map(move |source| (source, cost))
+                    }),
+            );
+            let mut remaining_visits = self.hierarchy_view_visits;
+            // Reserve root/proxy coverage for every visible registered asset instance.
+            let minimum = self
+                .cpu_lod
+                .draws
+                .iter()
+                .fold(DrawCost::default(), |sum, draw| {
+                    let (manifest, proxy) = &self.asset_manifests[&draw.reference];
+                    let root = self.asset_pages.select(manifest, false);
+                    let mesh = root
+                        .handle
+                        .and_then(|h| self.asset_pages.get(h))
+                        .unwrap_or(proxy);
+                    sum.add(
+                        DrawCost {
+                            clusters: 1,
+                            triangles: u64::from(mesh.count / 3),
+                        }
+                        .scaled(u64::from(draw.range.end - draw.range.start)),
+                    )
+                });
+            let mut allowance =
+                DrawAllowance::new(self.view_draw_budget, minimum.add(primitive_cost));
+            // Primitive meshes have no coarser asset coverage; charge their submitted cost.
+            allowance.admit(primitive_cost, primitive_cost, 0);
             for draw in &self.cpu_lod.draws {
                 let (manifest, proxy) = &self.asset_manifests[&draw.reference];
                 if manifest.is_hierarchical() {
                     for source in draw.range.clone() {
-                        let selected = self.asset_pages.select_cut(
+                        let model = scene.instances()[source as usize].model;
+                        let (mut selected, visited) = self.cut_cache.select(
+                            source,
                             manifest,
-                            self.hierarchy_cut_budget,
-                            |i, node| {
-                                if i == 0 {
-                                    return draw.want_detail;
-                                }
-                                asset_camera.as_ref().is_none_or(|v| {
-                                    v.assess(
-                                        node.bounds,
-                                        &scene.instances()[source as usize].model,
-                                        node.error,
-                                    )
-                                    .error_pixels
-                                        > f64::from(self.cpu_lod_policy.max_error_pixels)
+                            &self.asset_pages,
+                            cut_cache::CutView {
+                                vp: *vp,
+                                size: [width, height],
+                                model,
+                                policy: self.cpu_lod_policy,
+                                root: draw.want_detail,
+                                budget: asset_pages::HierarchyCutBudget {
+                                    max_visits: self
+                                        .hierarchy_cut_budget
+                                        .max_visits
+                                        .min(remaining_visits),
+                                    max_draws: self.hierarchy_cut_budget.max_draws,
+                                },
+                            },
+                            |node| {
+                                asset_camera.as_ref().map_or(f64::INFINITY, |v| {
+                                    v.assess(node.bounds, &model, node.error).error_pixels
                                 })
                             },
                         );
+                        remaining_visits -= visited;
+                        let root = self.asset_pages.select(manifest, false);
+                        let root_mesh = root
+                            .handle
+                            .and_then(|h| self.asset_pages.get(h))
+                            .unwrap_or(proxy);
+                        let baseline = DrawCost {
+                            clusters: 1,
+                            triangles: u64::from(root_mesh.count / 3),
+                        };
+                        let cost = selected.iter().fold(DrawCost::default(), |sum, p| {
+                            let mesh = p
+                                .handle
+                                .and_then(|h| self.asset_pages.get(h))
+                                .unwrap_or(proxy);
+                            sum.add(DrawCost {
+                                clusters: 1,
+                                triangles: u64::from(mesh.count / 3),
+                            })
+                        });
+                        if !allowance.admit(baseline, cost, 1) {
+                            selected.clear();
+                            selected.push(root);
+                        }
+
                         for selected in selected {
                             let mesh = selected
                                 .handle
@@ -592,11 +709,36 @@ impl Renderer {
                     }
                     continue;
                 }
-                let selected = self.asset_pages.select_hierarchy(
+                let mut selected = self.asset_pages.select_hierarchy(
                     manifest,
                     self.cpu_lod.hierarchy(draw.reference),
                     draw.want_detail,
                 );
+                let count = u64::from(draw.range.end - draw.range.start);
+                let root = self.asset_pages.select(manifest, false);
+                let root_mesh = root
+                    .handle
+                    .and_then(|h| self.asset_pages.get(h))
+                    .unwrap_or(proxy);
+                let candidate_mesh = selected
+                    .handle
+                    .and_then(|h| self.asset_pages.get(h))
+                    .unwrap_or(proxy);
+                if !allowance.admit(
+                    DrawCost {
+                        clusters: 1,
+                        triangles: u64::from(root_mesh.count / 3),
+                    }
+                    .scaled(count),
+                    DrawCost {
+                        clusters: 1,
+                        triangles: u64::from(candidate_mesh.count / 3),
+                    }
+                    .scaled(count),
+                    count,
+                ) {
+                    selected = root;
+                }
                 let mesh = selected
                     .handle
                     .and_then(|h| self.asset_pages.get(h))
@@ -605,6 +747,8 @@ impl Renderer {
                 pass.set_index_buffer(mesh.indices.slice(..), mesh.format);
                 pass.draw_indexed(0..mesh.count, 0, draw.range.clone());
             }
+            self.hierarchy_last_visits = self.hierarchy_view_visits - remaining_visits;
+            self.view_draw_stats = allowance.stats();
         }
         self.queue.submit([encoder.finish()]);
     }

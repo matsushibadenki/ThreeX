@@ -508,3 +508,65 @@ Document thread外の専用CPU laneと有界disk LRUを独立実装。開始時g
 English: Independent bounded generation preserves Rust ownership and durable replay semantics; no reference code or directory dependency is used.
 
 简体中文：独立实现有界生成，保留Rust所有权和持久再送去重，不复用参考代码，也不依赖参考目录。
+
+### G03-C1：view全体のasset階層訪問budget
+
+Universal-3Dの協調方針（Rust所有・共有形状と配置の分離・参照pathに依存しない）を読み取り確認。
+ThreeXでは表示instance間でasset階層の実訪問数を共有し、打ち切り後もroot／proxy coverageを維持する独立実装を追加した。
+[仕様と検証](view-hierarchy-budget.md)。Instance転送／gather cacheは変更せず、参照コードの流用や参照directoryへの依存も追加していない。
+
+English: A shared per-render asset traversal allowance retains coarse coverage without changing ownership or upload contracts.
+简体中文：共享逐帧资源层级访问预算，耗尽后保持粗略覆盖，不改变所有权与差量上传契约。
+
+### G03-C2：詳細LOD履歴とcut cache
+
+Universal-3DのRust所有・共有形状と配置の分離・参照path非依存の協調契約を読み取り確認。
+ThreeXに詳細nodeのhysteresisと有界cut cacheを独立実装した。
+[仕様・検証](lod-cut-cache.md)。参照ディレクトリの変更・コード流用・依存追加はない。
+
+English: Rust-owned bounded cut reuse preserves residency fallback and sparse upload/gather contracts.
+简体中文：Rust持有有界cut缓存，保留常驻回退、差量上传及gather契约。
+
+### G03-C3：instance空間階層のbudgetと再分割
+
+Universal-3Dの所有境界とsnap budget診断の区別を読み取り確認し、ThreeX固有の訪問上限と
+保守的なfrontier候補化、移動蓄積によるmedian再分割を独立実装した。
+[仕様と検証](instance-spatial-budget.md)。論理訪問上限をframe時間やGPU性能と混同しない。
+source slot／asset layout／GPU bankを変更せず、LOD履歴・cut cacheとgatherを維持する。
+参照コードの流用、参照directoryの変更・依存追加はない。
+
+English: Conservative frontier candidates preserve coverage; spatial maintenance retains source identity and Rust ownership.
+简体中文：保守候选保留完整覆盖，空间重分区保持实例标识、Rust所有权和差量上传契约。
+
+### G03-C4：view描画budgetとcoverage floor
+
+Universal-3DのRust所有・共有形状と配置の分離・参照path非依存の協調契約を再確認。
+ThreeXにroot／proxyの予約とcut単位の採否を独立実装し、通常形状を含むtriangle数を計上する。
+[仕様・検証](view-draw-budget.md)。coverageの予約量が指定値を超える場合は診断で明示する。
+LOD履歴やcut cacheをbudget却下で破壊せず、Instance／gatherの差分転送契約を維持する。
+参照コード流用・参照directoryの変更・依存追加はない。
+
+English: Whole-cut admission preserves coverage and cached LOD history; mandatory coverage above the requested limit is reported.
+简体中文：整体cut预算判定保留覆盖及LOD历史；最低覆盖超过请求预算时明确报告。
+
+### G03-C5：cut cache受付の優先度と公平性
+
+Universal-3DのRust所有・形状と配置の分離・参照path非依存の協調契約を読み取り確認。
+ThreeXに詳細要求／階層規模の優先枠と巡回枠、退避後の有界LOD履歴を独立実装した。
+[仕様と検証](cut-cache-fairness.md)。公平性はcache枠の機会であり、描画budgetや訪問budgetの迂回ではない。
+Instance転送・gather cache・Document所有は維持する。参照コード流用・参照directory変更・依存追加はない。
+
+English: Priority and cyclic admission preserve bounded cache opportunity without changing coverage or upload contracts.
+简体中文：优先级与循环分配提供有界缓存机会，保持覆盖、LOD历史及差量上传契约。
+
+### G04-A：view依存streamingの優先要求と共有budget
+
+Universal-3DのRust所有・共有形状と配置の分離・参照path非依存の協調方針を読み取り確認。
+ThreeXにSSE優先の有界page計画とRust workerのview batchを独立実装した。
+[仕様・検証](view-streaming.md)。root予約後に複数assetでrequest／判定budgetを共有し、
+新viewでは古い完了を公開しない。ページ配送は既存lease／guardを維持し、
+Document編集・LOD履歴・cut cache・Instance／gatherの差分契約を変更しない。
+参照コード流用・参照directoryの変更・依存追加はない。
+
+English: View-dependent bounded request planning connects to existing native loader leases without changing Document ownership.
+简体中文：视图相关的有界请求计划连接现有native loader lease，保持Rust Document所有权及差量更新契约。

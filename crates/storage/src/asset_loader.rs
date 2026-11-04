@@ -29,6 +29,9 @@ pub struct AssetLoaderStats {
     pub failed: u64,
     pub stale: u64,
     pub capacity_rejections: u64,
+    pub streaming_batches: u64,
+    pub streaming_reserved_requests: u64,
+    pub streaming_visits: u64,
 }
 impl AssetLoaderStats {
     pub(crate) fn pending(&mut self, count: usize) {
