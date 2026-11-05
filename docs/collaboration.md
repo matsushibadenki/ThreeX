@@ -570,3 +570,26 @@ Document編集・LOD履歴・cut cache・Instance／gatherの差分契約を変�
 
 English: View-dependent bounded request planning connects to existing native loader leases without changing Document ownership.
 简体中文：视图相关的有界请求计划连接现有native loader lease，保持Rust Document所有权及差量更新契约。
+
+### G04-A1：resident詳細pageの再I/O抑制
+
+Rust所有・surface世代境界を維持し、常駐詳細pageの再要求を省く独立実装を追加。
+参照directoryへの依存は追加していない。root metadataとpending要求統合は未完了。
+
+### G04-A2：root metadataと実行中batchの再利用
+
+Universal-3DのRust所有・参照path非依存の契約を確認。ThreeXに有界metadata cacheと
+厳密一致batchの合流を独立実装。Document／surface／view変更時の拒否契約を維持する。
+参照コードの流用・参照directoryへの依存追加はない。
+
+### G04-A3：部分重複batchとroot優先dispatch
+
+既存のRust所有・世代境界を維持し、互換batchの残りbudget共有と重複job保持を独立実装。
+既知metadataからroot投影誤差を評価し、新規受付順を決める。投入済みI/Oはpreemptしない。
+参照directoryへの依存追加・コード流用はない。global detail queueは次工程。
+
+### G04-A4：asset横断の詳細page queue
+
+Rust所有と既存lease／guardを維持し、2 loader共有の有界優先queueを独立実装。
+親の投影誤差で次の詳細pageを選び、待機中の旧要求は取消・降格する。
+参照コード流用・参照directoryへの依存追加はない。

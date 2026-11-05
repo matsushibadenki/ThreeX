@@ -138,6 +138,9 @@ struct Backend {
     cuts: Option<CutLog>,
 }
 impl SurfaceBackend for Backend {
+    fn asset_resident(&self, reference: AssetRef, page: u32) -> bool {
+        self.pool.is_resident(reference, page)
+    }
     fn configure(&mut self, _w: u32, _h: u32) -> Result<(), SurfaceFailure> {
         Ok(())
     }
@@ -796,12 +799,34 @@ fn view_streaming_shares_request_budget_across_roots_and_keeps_parent_coverage()
     assert_eq!(stats.failed, 0);
     assert_eq!(stats.streaming_reserved_requests, 4);
     assert!(stats.streaming_visits <= 64);
-    let reads = reads.lock().unwrap();
-    assert_eq!(reads.len(), 4);
-    assert_eq!(reads.iter().filter(|&&(n, _)| n == 0).count(), 2);
-    assert!(reads.iter().any(|&(n, _)| n == 1) && reads.iter().any(|&(n, _)| n == 4));
-    drop(reads);
+    let recorded = reads.lock().unwrap();
+    assert_eq!(recorded.len(), 4);
+    assert_eq!(recorded.iter().filter(|&&(n, _)| n == 0).count(), 2);
+    assert!(recorded.iter().any(|&(n, _)| n == 1) && recorded.iter().any(|&(n, _)| n == 4));
+    drop(recorded);
     assert!(cuts.lock().unwrap().iter().all(|(_, ids)| !ids.is_empty()));
+    call(
+        &c,
+        &mut next,
+        WorkerAction::StreamAssets {
+            target,
+            assets: vec![(1, path.clone())],
+            view: Box::new(streaming_view()),
+            budget: RequestBudget {
+                requests: 3,
+                visits: 64,
+            },
+        },
+    );
+    let repeated = idle(&c, &mut next);
+    assert!(
+        reads.lock().unwrap().last().unwrap().1,
+        "root metadata must be reused"
+    );
+    assert_eq!(
+        repeated.completed, 5,
+        "resident children must not be read again"
+    );
     let WorkerOutcome::StreamAssets { accepted, .. } = call(
         &c,
         &mut next,
@@ -818,7 +843,7 @@ fn view_streaming_shares_request_budget_across_roots_and_keeps_parent_coverage()
         panic!()
     };
     assert_eq!(accepted, 0);
-    assert_eq!(idle(&c, &mut next).completed, 4);
+    assert_eq!(idle(&c, &mut next).completed, 5);
     worker.shutdown().unwrap();
 }
 #[test]
@@ -842,7 +867,7 @@ fn new_view_discards_inflight_streaming_without_freeing_lease_early() {
     .unwrap();
     let c = worker.client();
     let mut next = 0;
-    bind(&c, &mut next, reference, 1);
+    bind(&c, &mut next, reference, 2);
     call(
         &c,
         &mut next,
@@ -857,6 +882,42 @@ fn new_view_discards_inflight_streaming_without_freeing_lease_early() {
         },
     );
     gate.wait_started(1);
+    // Exact repeated batch shares the in-flight job instead of cancelling its root.
+    let WorkerOutcome::StreamAssets { accepted, .. } = call(
+        &c,
+        &mut next,
+        WorkerAction::StreamAssets {
+            target,
+            assets: vec![(1, t.0.join("hierarchy"))],
+            view: Box::new(streaming_view()),
+            budget: RequestBudget {
+                requests: 7,
+                visits: 64,
+            },
+        },
+    ) else {
+        panic!()
+    };
+    assert_eq!(accepted, 1);
+    assert_eq!(gate.state.lock().unwrap().started, 1);
+    let WorkerOutcome::StreamAssets { accepted, .. } = call(
+        &c,
+        &mut next,
+        WorkerAction::StreamAssets {
+            target,
+            assets: vec![(2, t.0.join("hierarchy")), (1, t.0.join("hierarchy"))],
+            view: Box::new(streaming_view()),
+            budget: RequestBudget {
+                requests: 7,
+                visits: 64,
+            },
+        },
+    ) else {
+        panic!()
+    };
+    assert_eq!(accepted, 2);
+    gate.wait_started(2);
+
     call(
         &c,
         &mut next,
@@ -875,10 +936,10 @@ fn new_view_discards_inflight_streaming_without_freeing_lease_early() {
     else {
         panic!()
     };
-    assert_eq!(stats.pending, 1);
+    assert_eq!(stats.pending, 2);
     gate.open();
     let stats = idle(&c, &mut next);
-    assert_eq!(stats.stale, 1);
+    assert_eq!(stats.stale, 2);
     assert_eq!(stats.completed, 0);
     assert!(log.lock().unwrap().is_empty());
     worker.shutdown().unwrap();

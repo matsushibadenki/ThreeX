@@ -2,7 +2,7 @@
 use crate::worker::Envelope;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex, mpsc},
     thread,
 };
 use threex_core::{
@@ -92,6 +92,8 @@ impl PageSource for DiskSource {
     }
 }
 pub(crate) struct Task {
+    pub priority: f64,
+    pub cancelled: bool,
     pub ticket: ResourceHandle,
     pub path: PathBuf,
     pub reference: AssetRef,
@@ -103,8 +105,9 @@ pub(crate) struct Completion {
     pub level: u32,
     pub loaded: Loaded,
 }
+type TaskQueue = Arc<(Mutex<(Vec<Task>, bool)>, Condvar)>;
 pub(crate) struct Loader {
-    sender: Option<mpsc::SyncSender<Task>>,
+    queue: TaskQueue,
     threads: Vec<thread::JoinHandle<()>>,
 }
 impl Loader {
@@ -112,23 +115,35 @@ impl Loader {
         completion: mpsc::SyncSender<Envelope>,
         source: Arc<dyn PageSource>,
     ) -> std::io::Result<Self> {
-        let (sender, receiver) = mpsc::sync_channel::<Task>(ASSET_LOAD_CAPACITY as usize);
-        let receiver = Arc::new(Mutex::new(receiver));
+        let queue = Arc::new((Mutex::new((Vec::<Task>::new(), false)), Condvar::new()));
         let mut threads = Vec::new();
         for index in 0..ASSET_LOAD_THREADS {
-            let rx = receiver.clone();
+            let rx = queue.clone();
             let tx = completion.clone();
             let source = source.clone();
             let result = thread::Builder::new()
                 .name(format!("threex-asset-{index}"))
                 .spawn(move || {
                     loop {
-                        let task = match rx.lock() {
-                            Ok(rx) => rx.recv(),
-                            Err(_) => break,
+                        let task = {
+                            let (lock, cv) = &*rx;
+                            let mut state = lock.lock().unwrap();
+                            while state.0.is_empty() && !state.1 {
+                                state = cv.wait(state).unwrap();
+                            }
+                            if state.0.is_empty() {
+                                break;
+                            }
+                            let index = best(&state.0, |t| t.priority);
+                            state.0.remove(index)
                         };
-                        let Ok(task) = task else { break };
                         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if task.cancelled {
+                                return Loaded {
+                                    manifest: None,
+                                    page: Err(PageFailure::Stale),
+                                };
+                            }
                             source.read_known(
                                 &task.path,
                                 task.reference,
@@ -155,7 +170,8 @@ impl Loader {
             match result {
                 Ok(t) => threads.push(t),
                 Err(e) => {
-                    drop(sender);
+                    queue.0.lock().unwrap().1 = true;
+                    queue.1.notify_all();
                     for t in threads {
                         let _ = t.join();
                     }
@@ -163,23 +179,54 @@ impl Loader {
                 }
             }
         }
-        Ok(Self {
-            sender: Some(sender),
-            threads,
-        })
+        Ok(Self { queue, threads })
     }
-    pub fn submit(&self, task: Task) -> Result<(), Task> {
-        match self.sender.as_ref().unwrap().try_send(task) {
-            Ok(()) => Ok(()),
-            Err(mpsc::TrySendError::Full(t) | mpsc::TrySendError::Disconnected(t)) => Err(t),
+    pub fn reprioritize(&self, mut update: impl FnMut(&mut Task)) {
+        let mut state = self.queue.0.lock().unwrap();
+        for task in &mut state.0 {
+            update(task);
         }
     }
+    pub fn submit(&self, task: Task) -> Result<(), ()> {
+        let mut state = self.queue.0.lock().unwrap();
+        if state.1 || state.0.len() >= ASSET_LOAD_CAPACITY as usize {
+            return Err(());
+        }
+        state.0.push(task);
+        self.queue.1.notify_one();
+        Ok(())
+    }
+}
+fn best<T>(items: &[T], priority: impl Fn(&T) -> f64) -> usize {
+    let mut best = 0;
+    for i in 1..items.len() {
+        if priority(&items[i])
+            .total_cmp(&priority(&items[best]))
+            .is_gt()
+        {
+            best = i;
+        }
+    }
+    best
 }
 impl Drop for Loader {
     fn drop(&mut self) {
-        self.sender.take();
+        self.queue.0.lock().unwrap().1 = true;
+        self.queue.1.notify_all();
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    #[test]
+    fn waiting_work_reprioritizes_across_assets_and_preserves_fifo_ties() {
+        let mut items = vec![(1, 2.), (2, 8.), (3, 8.)];
+        assert_eq!(super::best(&items, |v| v.1), 1);
+        items[0].1 = 10.;
+        assert_eq!(items.remove(super::best(&items, |v| v.1)).0, 1);
+        assert_eq!(items.remove(super::best(&items, |v| v.1)).0, 2);
     }
 }

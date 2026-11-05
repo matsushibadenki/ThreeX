@@ -182,7 +182,11 @@ budget縮小でもcoverageを維持するCPUテスト。実画像の亀裂・pop
 ### G04：非同期streaming・複数budget・退避
 
 🟢 [Done] G04-A：CPUのview依存詳細要求を共有request／訪問budget付きで有界workerへ接続（[仕様・検証](view-streaming.md)）。
-🟠 [Next] resident-aware要求統合とasset横断優先dispatch。
+🟢 [Done] G04-A1：常駐詳細pageの再I/O抑制（[仕様・検証](view-streaming.md)）。
+🟢 [Done] G04-A2：有界root metadata cacheと同一実行中batchの合流（[仕様・検証](view-streaming.md)）。
+🟢 [Done] G04-A3：互換部分重複batchのjob／残りbudget共有とasset横断root優先dispatch（[仕様](view-streaming.md)）。
+🟢 [Done] G04-A4：asset横断の有界詳細page優先queue、待機中旧要求の取消・降格（[仕様・検証](view-streaming.md)）。
+🟠 [Next] queue aging／I/O公平性とbyte budget。
 
 - page状態を未要求／待機／読込中／CPU常駐／GPU常駐／退避待ち／失敗などで明示し、重複要求をまとめる。
 - root／画面上の誤差改善が大きいpageを優先し、camera移動予測による先読みは余剰budget内に限定する。
@@ -296,8 +300,8 @@ MacBook Air实机帧时间、内存压力、持续负载和GPU正确性在完成
 ## Verification results
 
 - Native workspace compilation, formatting and Clippy: passed.
-- Rust core: 75 passed; storage: 86 passed; renderer: 56 passed; Tauri host: 18 passed in the current debug suite. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
-- Current native suite: 235 passed in debug; JS: 13 passed. The earlier G03-B2b3 release baseline passed 221 tests; G03-C1–C5／G04-A have not been rerun in release.
+- Rust core: 75 passed; storage: 87 passed; renderer: 56 passed; Tauri host: 18 passed in the current debug suite. Tauri IPC / native scheduler: 18 passed. Renderer lifecycle: 5 passed; WGSL validation: 2 passed.
+- Current native suite: 236 passed in debug; JS: 13 passed. The earlier G03-B2b3 release baseline passed 221 tests; G03-C1–C5／G04-A have not been rerun in release.
 - JS compatibility tests: 13 passed.
 - Native GPU pipeline / gather readback tests: attempted; Metal adapter NotFound. Explicitly ignored in normal tests.
 - WASM: target install failed; wasm-pack not installed. Browser path remains unverified.

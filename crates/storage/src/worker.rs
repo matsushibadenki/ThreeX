@@ -416,6 +416,8 @@ impl JournalWorker {
                     ),
                     loads: BTreeMap::new(),
                     load_stats: AssetLoaderStats::default(),
+                    root_metadata: BTreeMap::new(),
+                    stream_batch: None,
                     closed: driver_closed,
                     render_stamp,
                     asset_jobs: threex_renderer::resource_handles::ResourcePool::new(128),
@@ -483,11 +485,24 @@ struct LoadJob {
         Arc<Mutex<threex_renderer::streaming::RequestBudget>>,
     )>,
 }
+#[derive(PartialEq)]
+struct StreamBatchKey {
+    target: threex_renderer::native::SurfaceHandle,
+    assets: Vec<(u32, std::path::PathBuf)>,
+    view: threex_renderer::streaming::StreamingView,
+    budget: threex_renderer::streaming::RequestBudget,
+    stamp: threex_core::SceneStamp,
+}
 struct Service {
     loader: Loader,
     load_tickets: threex_renderer::resource_handles::ResourcePool<()>,
     loads: BTreeMap<threex_renderer::resource_handles::ResourceHandle, LoadJob>,
     load_stats: AssetLoaderStats,
+    root_metadata: BTreeMap<
+        (std::path::PathBuf, threex_core::AssetRef),
+        Arc<threex_core::asset_pages::AssetManifest>,
+    >,
+    stream_batch: Option<StreamBatchKey>,
     closed: Arc<AtomicBool>,
     asset_jobs: threex_renderer::resource_handles::ResourcePool<()>,
     asset_guards:
@@ -535,11 +550,16 @@ impl Service {
             return outcome(self, AssetLoadStatus::Busy, None);
         };
         let task = Task {
+            priority: f64::INFINITY,
+            cancelled: false,
             ticket,
             path: path.to_owned(),
             reference: guard.reference(),
             level: 0,
-            manifest: None,
+            manifest: self
+                .root_metadata
+                .get(&(path.to_owned(), guard.reference()))
+                .cloned(),
         };
         if self.loader.submit(task).is_err() {
             self.load_tickets.release(ticket);
@@ -577,21 +597,116 @@ impl Service {
         view: threex_renderer::streaming::StreamingView,
         mut budget: threex_renderer::streaming::RequestBudget,
     ) -> WorkerOutcome {
-        // A new view cancels old view-dependent results without freeing in-flight leases early.
-        for job in self
-            .loads
-            .values_mut()
-            .filter(|j| j.target == target && j.streaming.is_some())
-        {
-            job.cancelled = true;
-        }
-        self.load_stats.streaming_batches += 1;
         budget.requests = budget.requests.min(4096);
         budget.visits = budget.visits.min(4096);
-        let shared = Arc::new(Mutex::new(budget));
-        let mut accepted = 0;
+        let key = StreamBatchKey {
+            target,
+            assets: assets.to_vec(),
+            view,
+            budget,
+            stamp: self.owner.document().scene().stamp(),
+        };
+        let pending = self
+            .loads
+            .values()
+            .filter(|j| j.target == target && j.streaming.is_some() && !j.cancelled)
+            .count();
+        if self.stream_batch.as_ref() == Some(&key)
+            && pending > 0
+            && self.surfaces.size(target).is_ok()
+        {
+            return WorkerOutcome::StreamAssets {
+                accepted: pending,
+                state: self.state(),
+            };
+        }
+        let compatible = self.stream_batch.as_ref().is_some_and(|old| {
+            old.target == target
+                && old.view == view
+                && old.budget == budget
+                && old.stamp == key.stamp
+        });
+        let retained: std::collections::BTreeSet<_> = self
+            .loads
+            .iter()
+            .filter(|(_, j)| {
+                compatible
+                    && !j.cancelled
+                    && j.target == target
+                    && j.streaming.is_some()
+                    && assets
+                        .iter()
+                        .any(|(id, path)| *id == j.guard.entity() && *path == j.path)
+            })
+            .map(|(&ticket, _)| ticket)
+            .collect();
+        let shared = retained
+            .first()
+            .and_then(|ticket| {
+                self.loads[ticket]
+                    .streaming
+                    .as_ref()
+                    .map(|(_, b)| b.clone())
+            })
+            .unwrap_or_else(|| Arc::new(Mutex::new(budget)));
+        self.loader.reprioritize(|task| {
+            if let Some(job) = self.loads.get(&task.ticket)
+                && job.target == target
+                && job.streaming.is_some()
+            {
+                task.cancelled = !retained.contains(&task.ticket);
+                if task.cancelled {
+                    task.priority = f64::NEG_INFINITY;
+                }
+            }
+        });
+        self.stream_batch = Some(key);
+        for (ticket, job) in self
+            .loads
+            .iter_mut()
+            .filter(|(_, j)| j.target == target && j.streaming.is_some())
+        {
+            if !retained.contains(ticket) {
+                job.cancelled = true;
+            }
+        }
+        self.load_stats.streaming_batches += 1;
+        let mut accepted = retained.len();
+        // Metadata-known assets compete by projected root error; unknown roots bootstrap first.
+        let camera = threex_core::visibility::BoundsView::new(
+            &view.camera.map(f32::from_bits),
+            view.size[0],
+            view.size[1],
+        );
+        let mut ordered: Vec<_> = assets.iter().collect();
+        let priority = |(entity, path): &&(u32, std::path::PathBuf)| {
+            let document = self.owner.document();
+            document
+                .asset_job_guard(*entity)
+                .and_then(|g| self.root_metadata.get(&(path.clone(), g.reference())))
+                .and_then(|m| {
+                    document.scene().world_transform(*entity).map(|model| {
+                        camera.as_ref().map_or(f64::INFINITY, |v| {
+                            let a = v.assess(m.bounds(), &model, m.page(0).unwrap().error);
+                            if a.visibility == threex_core::visibility::BoundsVisibility::Outside {
+                                0.
+                            } else {
+                                a.error_pixels
+                            }
+                        })
+                    })
+                })
+                .unwrap_or(f64::INFINITY)
+        };
+        ordered.sort_by(|a, b| priority(b).total_cmp(&priority(a)).then(a.0.cmp(&b.0)));
         let mut seen = std::collections::BTreeSet::new();
-        for (entity, path) in assets {
+        for (entity, path) in ordered {
+            if retained
+                .iter()
+                .any(|ticket| self.loads[ticket].guard.entity() == *entity)
+            {
+                continue;
+            }
             if !seen.insert(*entity) || shared.lock().unwrap().requests == 0 {
                 continue;
             }
@@ -635,6 +750,12 @@ impl Service {
         if job.cancelled || !document.accepts_asset_result(&job.guard, job.guard.reference()) {
             self.load_stats.stale += 1;
         } else if let Some(manifest) = completion.loaded.manifest {
+            let cache_key = (job.path.clone(), manifest.reference());
+            if !self.root_metadata.contains_key(&cache_key) && self.root_metadata.len() == 8 {
+                self.root_metadata.pop_first();
+            }
+            self.root_metadata
+                .insert(cache_key, Arc::new(manifest.clone()));
             if job.level == 0 && job.detail {
                 if let Some((view, budget)) = &job.streaming {
                     if let Some(model) = document.scene().world_transform(job.guard.entity()) {
@@ -680,13 +801,49 @@ impl Service {
                     } else {
                         self.load_stats.failed += 1;
                     }
+                    if job.streaming.is_some() {
+                        job.remaining.retain(|&page| {
+                            !self
+                                .surfaces
+                                .asset_resident(job.target, job.guard.reference(), page)
+                        });
+                    }
                     if delivery.ready
                         && job.detail
                         && let Some(next_level) = job.remaining.pop_front()
                     {
                         // Previous input was consumed/dropped before the next page under the same lease.
                         job.level = next_level;
+                        let priority = job
+                            .streaming
+                            .as_ref()
+                            .and_then(|(view, _)| {
+                                let model = document.scene().world_transform(job.guard.entity())?;
+                                let camera = threex_core::visibility::BoundsView::new(
+                                    &view.camera.map(f32::from_bits),
+                                    view.size[0],
+                                    view.size[1],
+                                );
+                                let node = known.hierarchy().and_then(|h| {
+                                    h.nodes()
+                                        .iter()
+                                        .find(|n| n.children.contains(&(next_level as usize)))
+                                });
+                                Some(camera.as_ref().map_or(f64::INFINITY, |v| {
+                                    v.assess(
+                                        node.map_or(known.bounds(), |n| n.bounds),
+                                        &model,
+                                        node.map_or(known.page(next_level).unwrap().error, |n| {
+                                            n.error
+                                        }),
+                                    )
+                                    .error_pixels
+                                }))
+                            })
+                            .unwrap_or(0.);
                         let task = Task {
+                            priority,
+                            cancelled: false,
                             ticket: completion.ticket,
                             path: job.path.clone(),
                             reference: job.guard.reference(),

@@ -98,6 +98,9 @@ impl<T> PagePool<T> {
             residency: 0,
         }
     }
+    pub fn is_resident(&self, reference: AssetRef, page: u32) -> bool {
+        self.ready.contains_key(&(reference, page))
+    }
     pub fn residency_revision(&self) -> u64 {
         self.residency
     }

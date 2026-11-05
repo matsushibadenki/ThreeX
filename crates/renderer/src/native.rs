@@ -75,6 +75,9 @@ pub struct AssetDelivery {
 }
 /// A backend owns the surface and renderer, never a Document or Scene clone.
 pub trait SurfaceBackend: Send {
+    fn asset_resident(&self, _reference: threex_core::AssetRef, _page: u32) -> bool {
+        false
+    }
     fn upload_asset(
         &mut self,
         _document: &Document,
@@ -123,6 +126,26 @@ impl NativeSurfaces {
         } else {
             self.scene_changed();
         }
+    }
+    pub fn asset_resident(
+        &self,
+        handle: SurfaceHandle,
+        reference: threex_core::AssetRef,
+        page: u32,
+    ) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|targets| {
+                targets
+                    .entries
+                    .get(&handle.id)
+                    .filter(|t| {
+                        t.generation == handle.generation && !t.suspended && t.failed.is_none()
+                    })
+                    .map(|t| t.backend.asset_resident(reference, page))
+            })
+            .unwrap_or(false)
     }
     pub fn upload_asset(
         &self,
@@ -392,6 +415,9 @@ impl WgpuSurface {
     }
 }
 impl SurfaceBackend for WgpuSurface {
+    fn asset_resident(&self, reference: threex_core::AssetRef, page: u32) -> bool {
+        self.renderer.asset_pages.is_resident(reference, page)
+    }
     fn upload_asset(
         &mut self,
         document: &Document,
