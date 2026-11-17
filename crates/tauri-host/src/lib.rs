@@ -559,6 +559,15 @@ pub fn invoke_handler<R: Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + 
         generated(invoke)
     }
 }
+/// Creates a standalone top-level webview window on the Tauri event loop.
+pub fn create_webview_window<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+    url: tauri::WebviewUrl,
+) -> tauri::Result<tauri::WebviewWindow<R>> {
+    tauri::WebviewWindowBuilder::new(app, label, url).build()
+}
+
 /// Registers this library's single command and managed application host.
 pub fn attach<R: Runtime>(builder: tauri::Builder<R>, host: IpcHost) -> tauri::Builder<R> {
     builder.manage(host).invoke_handler(invoke_handler())
@@ -1610,7 +1619,16 @@ mod tests {
         let handle = host
             .attach_surface("main", 1, scheduled_backend(&log), 64, 64)
             .unwrap();
-        let window = tauri::WindowBuilder::new(&a, "viewport").build().unwrap();
+        let window = create_webview_window(
+            a.handle(),
+            "viewport",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .unwrap();
+        let panel = view(&a, "panel");
+        assert_ne!(window.label(), panel.label());
+        assert!(a.get_webview_window("viewport").is_some());
+        assert!(a.get_webview_window("panel").is_some());
         let redraw = host.bind_native_window("main", handle, &window).unwrap();
         assert!(redraw.wait_idle());
         assert!(log.lock().unwrap().frames.is_empty());

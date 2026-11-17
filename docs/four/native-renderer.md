@@ -23,10 +23,14 @@ NativeSurfacesはRustの共有registryで、最大16 target。SurfaceHandleはRu
 
 ## Tauriホストからの接続
 
-native WindowはWebViewパネルと分離して、Tauriイベントループ上で生成する。
-準備中は非表示にし、接続とイベントcallbackの設定後に表示して初期resizeの取り逃しを避ける。
-`attach_native_window(Arc<Window>, id).await` はそのWindowのラベルに接続する。
-`attach_native_window_for("main", Arc<Window>, id).await` はRustで許可したmainパネルを
+viewport・パネルはそれぞれ固有ラベルを持つ独立した `WebviewWindow` として、Tauriイベントループ上で生成する。
+標準設定で生成するRustホスト向けの入口は `create_webview_window(app, label, url)`。
+
+English: Create each viewport and panel as a standalone `WebviewWindow` with a unique label.
+简体中文：每个视口和面板使用具有唯一标签的独立 `WebviewWindow`。
+初期表示を制御する場合は `WebviewWindowBuilder::visible(false)` で生成し、接続とイベントcallbackの設定後に表示して初期resizeの取り逃しを避ける。
+`attach_native_window(Arc<WebviewWindow>, id).await` はそのWindowのラベルに接続する。
+`attach_native_window_for("main", Arc<WebviewWindow>, id).await` はRustで許可したmainパネルを
 別native viewportのcontrollerにできる。controllerの指定やraw handleをIPC本文から受け付けない。
 
 helperは `run_on_main_thread` で物理サイズを取得し、owned Arcからwgpu Surfaceを生成する。

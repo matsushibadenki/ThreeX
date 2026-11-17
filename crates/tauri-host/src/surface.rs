@@ -145,10 +145,10 @@ impl IpcHost {
         Ok(handle)
     }
     /// Creates the surface on the Tauri event loop. The owned Arc keeps the window alive for wgpu.
-    /// The caller creates its native Window on that event loop, separate from panel WebViews.
+    /// The caller creates its standalone WebviewWindow on that event loop.
     pub async fn attach_native_window<R: Runtime>(
         &self,
-        window: Arc<tauri::Window<R>>,
+        window: Arc<tauri::WebviewWindow<R>>,
         id: u64,
     ) -> Result<SurfaceHandle, ErrorDto> {
         let label = window.label().to_owned();
@@ -159,7 +159,7 @@ impl IpcHost {
     pub async fn attach_native_window_for<R: Runtime>(
         &self,
         label: &str,
-        window: Arc<tauri::Window<R>>,
+        window: Arc<tauri::WebviewWindow<R>>,
         id: u64,
     ) -> Result<SurfaceHandle, ErrorDto> {
         {

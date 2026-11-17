@@ -7,7 +7,7 @@ RustのDocument所有、永続ProtocolRequest、checkpoint／journal v4、ipc-se
 
 ## 接続と所有
 
-`attach_native_window_for(controller, Arc<Window>, id).await` と `attach_native_window` は、
+`attach_native_window_for(controller, Arc<WebviewWindow>, id).await` と `attach_native_window` は、
 surface準備後に `bind_native_window` を呼び、イベントcallbackとschedulerを自動登録する。
 Window生成は従来どおりTauriイベントループ上で行い、準備中は非表示にする。
 素のnative Windowを生成する実アプリはTauriの `wry`／`unstable` 機能を有効にする。

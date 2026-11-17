@@ -607,7 +607,7 @@ impl IpcHost {
         &self,
         label: &str,
         handle: SurfaceHandle,
-        window: &tauri::Window<R>,
+        window: &tauri::WebviewWindow<R>,
     ) -> Result<RedrawHandle, ErrorDto> {
         let size = window
             .inner_size()
